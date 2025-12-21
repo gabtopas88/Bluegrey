@@ -9,6 +9,10 @@ class DataManager:
     """
     Asset-Agnostic Data Handler.
     It takes a dictionary of {Key: Contract} and maintains a price table.
+    Responsibilities:
+    1. Connect to Data Streams.
+    2. Clean/Normalize incoming ticks (handle NaN, delayed data).
+    3. Provide a 'single source of truth' price table.
     """
     def __init__(self, ib_instance, instruments_dict):
         self.ib = ib_instance
