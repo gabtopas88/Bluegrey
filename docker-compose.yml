@@ -1,0 +1,13 @@
+services:
+  research:
+    build: .
+    container_name: bluegrey_research
+    volumes:
+      - ./src:/app/src              # Syncs your code
+      - ./data:/app/data            # Syncs your database (ArcticDB)
+      - ./notebooks:/app/notebooks  # Syncs your experiments
+    ports:
+      - "8888:8888"                 # Jupyter Port
+    environment:
+      - IB_HOST=host.docker.internal  # SPECIAL DNS to talk to Windows Host
+      - IB_PORT=7497

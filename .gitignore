@@ -1,0 +1,20 @@
+# --- Python Garbage ---
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# --- Environment ---
+.env
+.venv
+env/
+venv/
+
+# --- DATA (CRITICAL: DO NOT SYNC THIS) ---
+data/
+*.log
+*.csv
+
+# --- IDE Settings ---
+.vscode/
+.idea/
