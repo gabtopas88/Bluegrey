@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bluegrey"
+version = "0.1.0"
+description = "Bluegrey Algorithmic Trading Engine"
+authors = [{name = "Gabriel"}]
+readme = "README.md"
+requires-python = ">=3.9"
+
+# CORE INGREDIENTS ONLY
+# These are required for 'src' and 'strategies' to function.
+dependencies = [
+    "ib_async",         # Connection to IBKR
+    "pandas",           # Data handling
+    "numpy",            # Math
+    "scipy",            # Advanced Math (Kalman)
+    "scikit-learn",     # Machine Learning / Regressions
+    "arcticdb",         # Database
+    "streamlit",        # Dashboard
+    "plotly",           # interactive charts
+    "matplotlib",       # Static charts
+    "seaborn",          # Pretty charts
+    "jupyterlab"        # Research Environment
+]
+
+[tool.setuptools.packages.find]
+where = ["."]  
+# We only package the "Engine" (src) and "Logic" (strategies).
+# We exclude "research", "tools", and "dashboard" because they are scripts, not libraries.
+include = ["src*", "strategies*"]

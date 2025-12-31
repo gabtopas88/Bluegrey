@@ -1,0 +1,11 @@
+ib_async
+pandas
+numpy
+scipy
+scikit-learn
+arcticdb
+streamlit
+plotly
+matplotlib
+seaborn
+jupyterlab

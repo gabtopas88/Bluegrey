@@ -1,7 +1,8 @@
 """
 It connects to ArcticDB (or any DB) to save history and retrieve it. It creates the "Single Source of Truth" for your research.
 """
-
+import os
+from pathlib import Path
 import pandas as pd
 import arcticdb as adb
 from datetime import datetime
@@ -16,8 +17,21 @@ class DataStore:
     Abstracts away the specific database (ArcticDB) so you can swap it later.
     """
     def __init__(self, library_name="quant_data_v1"):
+        
+        # 1. Find the Project Root dynamically
+        # This file is in: .../Bluegrey/src/store.py
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parent.parent # Go up two levels (src -> Bluegrey)
+        
+        # 2. Define the Absolute Path to the Database
+        # This ensures we always point to 'Bluegrey/data/db'
+        db_path = project_root / "data" / "db"
+        
+        # 3. Create Connection String
+        uri = f"lmdb://{db_path}"
+
         # Connect to Local LMDB (fast, file-based)
-        self.arctic = adb.Arctic("lmdb://./data/db") 
+        self.arctic = adb.Arctic(uri) 
         
         # Ensure Library Exists
         if library_name not in self.arctic.list_libraries():

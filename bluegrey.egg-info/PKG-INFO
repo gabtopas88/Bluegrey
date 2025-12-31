@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: bluegrey
+Version: 0.1.0
+Summary: Bluegrey Algorithmic Trading Engine
+Author: Gabriel
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: ib_async
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: scikit-learn
+Requires-Dist: arcticdb
+Requires-Dist: streamlit
+Requires-Dist: plotly
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: jupyterlab
