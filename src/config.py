@@ -43,8 +43,39 @@ INSTRUMENTS = {
 
 
 # --- STRATEGY SETTINGS ---
-STRATEGY_CLASS = "MomentumStrategy" # For dynamic loading later
-STRATEGY_PARAMS = {
-    "window": 20,
-    "qty": 10
+STRATEGY_CLASS = "KalmanPairStrategy" # For dynamic loading later
+STRATEGY_PARAMS = {} #To Be Completed.
+
+
+# ==========================================
+# 🏗️ BLUEGREY INFRASTRUCTURE (ADDED)
+# ==========================================
+import os
+from pathlib import Path
+
+# --- PATHS ---
+# Defines the absolute path to the project root
+# (Assumes config.py is inside /src, so we go up one level)
+SRC_DIR = Path(__file__).parent.resolve()
+ROOT_DIR = SRC_DIR.parent
+DATA_DIR = ROOT_DIR / "data"
+
+# Ensure data directory exists
+DATA_DIR.mkdir(exist_ok=True)
+
+# --- DATABASE (ArcticDB) ---
+
+ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=500GB"
+LIBS = {
+    "equity_min": "equity.min",
+    "fx_min": "fx.min",
+    "futures_min": "futures.min"
 }
+
+# --- DATA VENDORS ---
+# Polygon.io API Key
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
+
+# --- MAPPINGS ---
+# We will eventually map your IBKR 'INSTRUMENTS' keys to Polygon tickers here.
+# For now, auto-discovery handles the FX.
