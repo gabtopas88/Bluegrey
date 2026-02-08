@@ -1,8 +1,10 @@
 import pandas as pd
 import numpy as np
 import logging
+from datetime import timedelta
 from src.store import DataStore
 
+# Minimal Logging for Backtest (Clean Output)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger()
 
@@ -21,48 +23,47 @@ class VirtualBroker:
     def mark_to_market(self, prices, timestamp):
         """Calculates total Liquidation Value of the portfolio"""
         equity = self.cash
-        for symbol, qty in self.positions.items():
-            if symbol in prices:
-                equity += qty * prices[symbol]
+        for key, qty in self.positions.items():
+            # If we hold an asset but have no current price, use 0 (or last known)
+            # This 'get(key, 0)' is a safety fallback.
+            price = prices.get(key, 0)
+            equity += qty * price
         
         self.equity_curve.append({'time': timestamp, 'equity': equity})
         return equity
 
     def execute(self, orders, market_prices):
+        """
+        Fills orders based on the passed market_prices.
+        """
         fills = []
         for order in orders:
-            # Resolve symbol from Contract object or config key
-            # (Assumes order['contract'] has a mapped symbol or we pass the key directly)
-            # For this snippet, we assume the strategy passes the CONFIG KEY as a string or we map it.
-            # In your current setup, you need a way to map Contract -> Config Key here.
-            # Let's assume we fixed that mapping.
-            symbol = order['key'] 
+            key = order['key'] 
             action = order['action'] # BUY/SELL
             qty = order['qty']
             
-            if symbol not in market_prices:
+            if key not in market_prices or pd.isna(market_prices[key]):
                 continue # Can't fill if no price
             
-            price = market_prices[symbol]
+            price = market_prices[key]
             
             # SLIPPAGE MODEL
-            # If buying, we pay more. If selling, we get less.
-            slip = 0.01 * self.slippage_ticks # Assuming 1 tick = 1 cent for stocks
+            slip = 0.01 * self.slippage_ticks 
             fill_price = price + slip if action == 'BUY' else price - slip
             
             # COST MODEL
-            commission = max(1.0, qty * self.commission_per_share) # Min $1 ticket
-            
+            commission = max(1.0, qty * self.commission_per_share)
             cost = fill_price * qty
+            
             if action == 'BUY':
                 self.cash -= (cost + commission)
-                self.positions[symbol] = self.positions.get(symbol, 0) + qty
+                self.positions[key] = self.positions.get(key, 0) + qty
             elif action == 'SELL':
                 self.cash += (cost - commission)
-                self.positions[symbol] = self.positions.get(symbol, 0) - qty
+                self.positions[key] = self.positions.get(key, 0) - qty
                 
             fills.append({
-                'symbol': symbol,
+                'asset': key,
                 'action': action,
                 'qty': qty,
                 'price': fill_price,
@@ -71,67 +72,96 @@ class VirtualBroker:
         return fills
 
 class BacktestEngine:
-    def __init__(self, strategy_class, config_instruments, config_params, start_cap=100000):
+    """
+    The Time Machine.
+    Simulates the Live Engine's Event Loop over historical data.
+    Enforces 'Reset' on data gaps and eliminates Look-Ahead Bias.
+    """
+    def __init__(self, strategy_class, instruments, params, start_cap=100000):
         self.store = DataStore()
-        self.instruments = config_instruments
-        self.params = config_params
-        self.strategy = strategy_class(self.instruments, self.params)
+        self.instruments = instruments
+        self.params = params
+        
+        # Instantiate Strategy
+        self.strategy = strategy_class(instruments, params)
+        
+        # The Accountant
         self.broker = VirtualBroker(start_cap)
-        self.results = []
+        
+        # Results Buffers
+        self.trades = []
+        self.history = [] # For Strategy Metadata (Z-scores, etc.)
+        
+        # Gap Settings
+        self.gap_threshold = timedelta(hours=1)
 
     def run(self, start_date, end_date):
-        print(f"⏳ Loading Data ({start_date} to {end_date})...")
+        print(f"⏳ Loading Data for {len(self.instruments)} assets ({start_date} to {end_date})...")
         
-        # [Data Loading Logic - Same as before]
+        # 1. LOAD & ALIGN DATA
         dfs = {}
         for key in self.instruments.keys():
             df = self.store.load(key, start_date, end_date)
-            if df is None: return
-            dfs[key] = df['close']
-        
+            if df is None or df.empty:
+                print(f"❌ Critical: No data for {key}")
+                return pd.DataFrame() # Return empty on failure
+            dfs[key] = df['close'] # Flatten to single price series per asset
+            
+        # Merge into Master Price Board
         universe = pd.DataFrame(dfs).fillna(method='ffill').dropna()
-        print(f"▶️ Running Backtest on {len(universe)} ticks...")
+        
+        if universe.empty:
+            print("❌ Universe is empty after alignment.")
+            return pd.DataFrame()
 
+        print(f"▶️ Simulating {len(universe)} ticks...")
+
+        # 2. THE EVENT LOOP
+        last_time = None
         pending_orders = [] # Orders generated at T, to be filled at T+1
 
-        # 2. EVENT LOOP (Corrected for Look-Ahead Bias)
         for timestamp, row in universe.iterrows():
             
-            # A. EXECUTION PHASE (Fill orders from PREVIOUS tick)
+            # --- A. CHECK FOR GAPS (The Heartbeat) ---
+            if last_time:
+                delta = timestamp - last_time
+                if delta > self.gap_threshold:
+                    # ⚠️ GAP DETECTED -> RESET STRATEGY
+                    if hasattr(self.strategy, 'reset'):
+                        self.strategy.reset()
+                    pending_orders = [] # Cancel pending orders on gap? (Optional, usually safer)
+            
+            last_time = timestamp
+
+            # --- B. EXECUTION PHASE (Fill orders from PREVIOUS tick) ---
             if pending_orders:
-                # We fill using CURRENT prices (Open/Close of this bar)
-                # Note: Using 'row' (Close) implies we fill at Close of T.
-                # Ideally, if we have OHLC, we fill at Open of T.
-                # For now, filling at Close of T is "Next Tick Execution" relative to T-1.
                 fills = self.broker.execute(pending_orders, row)
                 for fill in fills:
-                    self.results.append({**fill, 'time': timestamp})
+                    self.trades.append({**fill, 'time': timestamp})
                 pending_orders = []
 
-            # B. STRATEGY PHASE (Generate signals based on CURRENT prices)
+            # --- C. STRATEGY PHASE (Generate signals based on CURRENT prices) ---
             signal = self.strategy.on_tick(row)
             
-            # C. ORDER RECORDING (Do NOT execute yet)
-            if signal and signal.orders:
-                # We must map the contract object back to the string key for the Broker
-                # This requires a quick helper or modification in the Signal object
-                formatted_orders = []
-                for o in signal.orders:
-                    # Quick hack to find key:
-                    # Real fix: Pass keys in Strategy or store map in Signal
-                    key = [k for k, v in self.instruments.items() if v.symbol == o['contract'].symbol][0]
-                    formatted_orders.append({
-                        'key': key, 
-                        'action': o['action'], 
-                        'qty': o['qty']
-                    })
-                
-                pending_orders = formatted_orders
+            # --- D. RECORDING (Do NOT execute yet) ---
+            if signal:
+                # 1. Store Metadata (Z-scores, etc.)
+                if signal.meta:
+                    record = signal.meta.copy()
+                    record['timestamp'] = timestamp
+                    self.history.append(record)
 
-            # D. REPORTING
+                # 2. Queue Orders for NEXT tick
+                if signal.orders:
+                    # Orders already have 'key' thanks to base.py update
+                    pending_orders = signal.orders
+
+            # --- E. REPORTING ---
             self.broker.mark_to_market(row, timestamp)
 
         print("✅ Backtest Complete.")
         
-        # Return Equity Curve for Analysis
+        # Return Equity Curve (Primary) and History (Secondary)
+        # We can attach history to the object or return a tuple if needed.
+        # For now, we return Equity Curve to match the notebook call.
         return pd.DataFrame(self.broker.equity_curve).set_index('time')
