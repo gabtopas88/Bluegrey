@@ -18,3 +18,8 @@ data/
 # --- IDE Settings ---
 .vscode/
 .idea/
+
+# --- Distribution / Build Artifacts ---
+build/
+dist/
+*.egg-info/
