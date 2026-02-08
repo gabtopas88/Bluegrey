@@ -1,88 +1,125 @@
-"""
-This is the Simulation Engine. It mimics the main.py loop but moves through historical time instead of real time.
-Crucial: It uses the exact same Strategy class as the live engine. 
-This guarantees that if it works in the backtest, the logic is identical in live trading.
-"""
 import pandas as pd
+import numpy as np
+from datetime import timedelta
 import logging
 from src.store import DataStore
+from strategies.base import StrategySignal
 
-# Minimal Logging for Backtest (Clean Output)
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 class BacktestEngine:
-    def __init__(self, strategy_class, config_instruments, config_params):
-        """
-        The Simulator.
-        strategy_class: The Class itself (e.g., GenericStrategy), not an instance.
-        """
+    """
+    The Time Machine.
+    Simulates the Live Engine's Event Loop over historical data.
+    Crucially: It enforces the 'Reset' logic on data gaps.
+    """
+    def __init__(self, strategy_class, instruments, params, start_date, end_date):
         self.store = DataStore()
-        self.instruments = config_instruments
-        self.params = config_params
+        self.instruments = instruments
+        self.params = params
+        self.start_date = start_date
+        self.end_date = end_date
         
-        # Initialize the Strategy (just like Live Engine does)
-        self.strategy = strategy_class(self.instruments, self.params)
+        # Instantiate Strategy
+        self.strategy = strategy_class(instruments, params)
         
-        self.results = []
+        # Results Buffer
+        self.trades = []
+        self.history = [] # For plotting indicators (Z-score, etc.)
+        
+        # Gap Settings
+        self.gap_threshold = timedelta(hours=1)
 
-    def run(self, start_date, end_date):
-        print(f"⏳ Loading Data ({start_date} to {end_date})...")
+    def run(self):
+        print(f"⏳ Loading Data for {len(self.instruments)} assets...")
         
         # 1. LOAD & ALIGN DATA
-        # We need to create a single synchronized timeline for all assets
+        # We align all assets to the same index (Outer Join) to simulate the 'Market Clock'
         dfs = {}
         for key in self.instruments.keys():
-            df = self.store.load(key, start_date, end_date)
-            if df is None:
-                print(f"❌ Missing data for {key}. Aborting.")
-                return
-            # Keep only Close price for simplicity in this template
-            # (In reality, you'd keep OHLC)
-            dfs[key] = df['close'] 
+            df = self.store.load(key, self.start_date, self.end_date)
+            if df is None or df.empty:
+                print(f"❌ Critical: No data for {key}")
+                return None
+            dfs[key] = df
+            
+        # Combine into a single Panel (using Closing prices for the 'Bar' update)
+        # Note: In a real tick-backtest, this is more complex. For 'on_bar' strategies, this is sufficient.
+        universe = pd.concat(dfs, axis=1, keys=self.instruments.keys())
+        universe.sort_index(inplace=True)
         
-        # Merge into one Master DataFrame (Outer Join to keep all timestamps)
-        # This simulates the "Price Board" in the live engine
-        universe = pd.DataFrame(dfs).fillna(method='ffill').dropna()
+        # Forward Fill: If Asset A ticks but Asset B doesn't, B retains previous price
+        # Dropna: We need at least one valid row to start
+        universe.fillna(method='ffill', inplace=True)
+        universe.dropna(inplace=True)
         
-        if universe.empty:
-            print("❌ Universe is empty after alignment. Check data dates.")
-            return
-
-        print(f"▶️ Running Backtest on {len(universe)} ticks...")
-
-        # 2. EVENT LOOP (The Time Machine)
+        print(f"▶️ Simulating {len(universe)} bars...")
+        
+        # 2. THE EVENT LOOP
+        last_time = None
+        
+        # We iterate through the 'Clock' (The Index)
         for timestamp, row in universe.iterrows():
-            # row is a Series with keys ['ASSET_A', 'ASSET_B']
-            # This matches exactly what strategy.on_tick receives in Live Mode!
             
-            signal = self.strategy.on_tick(row)
+            # --- A. CHECK FOR GAPS (The Heartbeat) ---
+            if last_time:
+                delta = timestamp - last_time
+                if delta > self.gap_threshold:
+                    # ⚠️ GAP DETECTED -> RESET STRATEGY
+                    # This ensures the backtest mimics the Live Engine's safety
+                    self.strategy.reset()
             
+            last_time = timestamp
+            
+            # --- B. PREPARE DATA ---
+            # Reconstruct the 'bars' DataFrame expected by strategy.on_bar()
+            # row is a MultiIndex Series: (ASSET_A, close), (ASSET_A, open)...
+            # We transform it back to a clean DataFrame for the strategy
+            
+            # Extract prices for easy access
+            current_prices = row.xs('close', level=1) # Series: [ASSET_A: 100, ASSET_B: 200]
+            
+            # --- C. UPDATE STRATEGY (The Math) ---
+            # Ideally, we pass the full OHLCV row, but for now we pass the prices as a proxy for the 'bar'
+            # In a full impl, we'd reconstruct the OHLC DataFrame.
+            signal = self.strategy.on_bar(current_prices) 
+            
+            # --- D. EXECUTE (The Trade) ---
             if signal:
-                self._record_trade(timestamp, signal, row)
+                self._record_activity(timestamp, signal, current_prices)
 
         print("✅ Backtest Complete.")
-        return pd.DataFrame(self.results)
+        return pd.DataFrame(self.trades), pd.DataFrame(self.history)
 
-    def _record_trade(self, timestamp, signal, prices):
+    def _record_activity(self, timestamp, signal, prices):
         """
-        Logs the simulated trade.
+        Logs trades and Strategy State (Z-score, Beta) for analysis.
         """
+        # 1. Log Metadata (The "Why")
+        if signal.meta:
+            record = signal.meta.copy()
+            record['timestamp'] = timestamp
+            self.history.append(record)
+            
+        # 2. Log Trades (The "What")
         for order in signal.orders:
-            # We log what would have happened
-            contract = order['contract']
-            # We need to find which config key this contract corresponds to
-            # (Simplified matching for demo)
-            asset_key = [k for k, v in self.instruments.items() if v.symbol == contract.symbol][0]
+            # Match Contract to Config Key
+            # (Simple reverse lookup for the backtest report)
+            asset_key = "UNKNOWN"
+            for k, v in self.instruments.items():
+                if v.symbol == order['contract'].symbol:
+                    asset_key = k
+                    break
             
-            fill_price = prices[asset_key]
+            # Simulate Fill (Slippage = 0 for now)
+            fill_price = prices.get(asset_key, 0)
             
-            self.results.append({
+            self.trades.append({
                 'time': timestamp,
-                'signal': signal.signal_type,
+                'signal_type': signal.signal_type,
                 'asset': asset_key,
                 'action': order['action'],
                 'qty': order['qty'],
                 'price': fill_price,
-                'meta': signal.meta
+                'value': fill_price * order['qty']
             })
