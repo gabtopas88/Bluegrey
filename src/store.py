@@ -1,56 +1,43 @@
-"""
-It connects to ArcticDB (or any DB) to save history and retrieve it. It creates the "Single Source of Truth" for your research.
-"""
-import os
-from pathlib import Path
 import pandas as pd
 import arcticdb as adb
-from datetime import datetime
 import logging
+from src.config import ARCTIC_PATH, LIBS  # <--- CRITICAL: Import the shared path
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 class DataStore:
     """
     The Librarian.
     Handles saving historical data and retrieving it for backtesting.
-    Abstracts away the specific database (ArcticDB) so you can swap it later.
+    Now strictly follows src/config.py for paths.
     """
-    def __init__(self, library_name="quant_data_v1"):
-        
-        # 1. Find the Project Root dynamically
-        # This file is in: .../Bluegrey/src/store.py
-        current_file = Path(__file__).resolve()
-        project_root = current_file.parent.parent # Go up two levels (src -> Bluegrey)
-        
-        # 2. Define the Absolute Path to the Database
-        # This ensures we always point to 'Bluegrey/data/db'
-        db_path = project_root / "data" / "db"
-        
-        # 3. Create Connection String
-        uri = f"lmdb://{db_path}"
+    def __init__(self, library_name=LIBS["equity_min"]):
+        # 1. Connect using the Central Config
+        try:
+            self.arctic = adb.Arctic(ARCTIC_PATH)
+            logger.info(f"🗄️ Connected to ArcticDB at: {ARCTIC_PATH}")
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to ArcticDB: {e}")
+            raise
 
-        # Connect to Local LMDB (fast, file-based)
-        self.arctic = adb.Arctic(uri) 
-        
-        # Ensure Library Exists
+        # 2. Ensure Library Exists
+        # If the user asks for a lib that doesn't exist, we create it.
         if library_name not in self.arctic.list_libraries():
             self.arctic.create_library(library_name)
+            logger.info(f"🆕 Created new library: {library_name}")
         
         self.lib = self.arctic[library_name]
-        logger.info(f"🗄️ Connected to DataStore: {library_name}")
 
     def save(self, key: str, data: pd.DataFrame):
         """
-        Saves a DataFrame to the DB under a specific Key (e.g., 'AMZN_STK').
+        Saves a DataFrame to the DB under a specific Key.
         """
         if data.empty:
             logger.warning(f"⚠️ Attempted to save empty data for {key}")
             return
             
-        # Ensure index is datetime for time-series operations
+        # Ensure index is datetime
         if not isinstance(data.index, pd.DatetimeIndex):
-            # Try to find a date column or complain
             if 'date' in data.columns:
                 data.set_index('date', inplace=True)
             elif 'timestamp' in data.columns:
@@ -68,12 +55,11 @@ class DataStore:
             logger.error(f"❌ Key '{key}' not found in database.")
             return None
             
-        # Read from Arctic (supports date range filtering)
-        # Note: ArcticDB generic read; specific range filtering depends on version
-        # For simplicity, we load all and slice (LMDB is fast enough for this scale)
+        # Read from Arctic
         item = self.lib.read(key)
         df = item.data
         
+        # Filter Dates (ArcticDB slicing is faster, but this is safe for now)
         if start_date:
             df = df[df.index >= start_date]
         if end_date:
