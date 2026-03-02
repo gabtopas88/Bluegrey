@@ -14,19 +14,33 @@ class VirtualBroker:
     Tracks Cash, Positions, and handles Order Execution logic (Slippage/Comm).
     """
     def __init__(self, initial_capital=100000.0):
+        self.initial_capital = initial_capital
         self.cash = initial_capital
         self.positions = {} # { 'ASSET_KEY': quantity }
         self.commission_per_share = 0.005 # IBKR Pro Tier approx
         self.slippage_ticks = 1 # Assume 1 tick slippage against us
         self.equity_curve = []
+        
+        # Valuation Cache
+        self.last_known_prices = {} 
 
     def mark_to_market(self, prices, timestamp):
-        """Calculates total Liquidation Value of the portfolio"""
+        """
+        Calculates total Liquidation Value of the portfolio.
+        CRITICAL FIX: Uses last known price if current price is missing (NaN).
+        """
+        # Update price cache with valid new data
+        for key, price in prices.items():
+            if price is not None and not pd.isna(price) and price > 0:
+                self.last_known_prices[key] = price
+
         equity = self.cash
         for key, qty in self.positions.items():
-            # If we hold an asset but have no current price, use 0 (or last known)
-            # This 'get(key, 0)' is a safety fallback.
-            price = prices.get(key, 0)
+            # Use current price, fallback to last known, fallback to 0 (bankruptcy protection)
+            price = prices.get(key)
+            if pd.isna(price) or price is None:
+                price = self.last_known_prices.get(key, 0)
+            
             equity += qty * price
         
         self.equity_curve.append({'time': timestamp, 'equity': equity})
@@ -42,10 +56,12 @@ class VirtualBroker:
             action = order['action'] # BUY/SELL
             qty = order['qty']
             
-            if key not in market_prices or pd.isna(market_prices[key]):
-                continue # Can't fill if no price
-            
-            price = market_prices[key]
+            # Check price availability
+            price = market_prices.get(key)
+            if pd.isna(price) or price is None:
+                # OPTIONAL: usage of last_known_prices for execution is risky.
+                # Real exchanges won't fill you if there's no liquidity. We skip.
+                continue 
             
             # SLIPPAGE MODEL
             slip = 0.01 * self.slippage_ticks 
@@ -67,7 +83,8 @@ class VirtualBroker:
                 'action': action,
                 'qty': qty,
                 'price': fill_price,
-                'comm': commission
+                'comm': commission,
+                'cost': cost
             })
         return fills
 
@@ -108,7 +125,8 @@ class BacktestEngine:
             dfs[key] = df['close'] # Flatten to single price series per asset
             
         # Merge into Master Price Board
-        universe = pd.DataFrame(dfs).fillna(method='ffill').dropna()
+        # We forward fill NaNs because in real life, the last price persists until a new tick arrives.
+        universe = pd.DataFrame(dfs).fillna(method='ffill')
         
         if universe.empty:
             print("❌ Universe is empty after alignment.")
@@ -120,7 +138,10 @@ class BacktestEngine:
         last_time = None
         pending_orders = [] # Orders generated at T, to be filled at T+1
 
-        for timestamp, row in universe.iterrows():
+        # PERFORMANCE OPTIMIZATION: itertuples() is ~50x faster than iterrows()
+        # row becomes a NamedTuple. Access columns via dot notation or _asdict().
+        for row in universe.itertuples():
+            timestamp = row.Index 
             
             # --- A. CHECK FOR GAPS (The Heartbeat) ---
             if last_time:
@@ -129,23 +150,29 @@ class BacktestEngine:
                     # ⚠️ GAP DETECTED -> RESET STRATEGY
                     if hasattr(self.strategy, 'reset'):
                         self.strategy.reset()
-                    pending_orders = [] # Cancel pending orders on gap? (Optional, usually safer)
+                    pending_orders = [] # Safety: Cancel pending orders on gap
             
             last_time = timestamp
 
+            # Prepare data for Strategy/Broker (Convert NamedTuple to Dict)
+            # We remove the Index from the dict to keep it clean
+            market_snapshot = row._asdict()
+            del market_snapshot['Index']
+
             # --- B. EXECUTION PHASE (Fill orders from PREVIOUS tick) ---
             if pending_orders:
-                fills = self.broker.execute(pending_orders, row)
+                fills = self.broker.execute(pending_orders, market_snapshot)
                 for fill in fills:
                     self.trades.append({**fill, 'time': timestamp})
                 pending_orders = []
 
             # --- C. STRATEGY PHASE (Generate signals based on CURRENT prices) ---
-            signal = self.strategy.on_tick(row)
+            # Strategies expect a dict {Key: Price}
+            signal = self.strategy.on_tick(market_snapshot)
             
             # --- D. RECORDING (Do NOT execute yet) ---
             if signal:
-                # 1. Store Metadata (Z-scores, etc.)
+                # 1. Store Metadata 
                 if signal.meta:
                     record = signal.meta.copy()
                     record['timestamp'] = timestamp
@@ -153,15 +180,29 @@ class BacktestEngine:
 
                 # 2. Queue Orders for NEXT tick
                 if signal.orders:
-                    # Orders already have 'key' thanks to base.py update
                     pending_orders = signal.orders
 
             # --- E. REPORTING ---
-            self.broker.mark_to_market(row, timestamp)
+            self.broker.mark_to_market(market_snapshot, timestamp)
 
         print("✅ Backtest Complete.")
+        self._generate_tearsheet()
         
-        # Return Equity Curve (Primary) and History (Secondary)
-        # We can attach history to the object or return a tuple if needed.
-        # For now, we return Equity Curve to match the notebook call.
         return pd.DataFrame(self.broker.equity_curve).set_index('time')
+
+    def _generate_tearsheet(self):
+        """Prints a quick summary of performance."""
+        if not self.broker.equity_curve:
+            return
+            
+        start_equity = self.broker.initial_capital
+        end_equity = self.broker.equity_curve[-1]['equity']
+        pnl = end_equity - start_equity
+        ret = (pnl / start_equity) * 100
+        
+        print(f"📊 --- RESULTS ---")
+        print(f"   Initial Cap: ${start_equity:,.2f}")
+        print(f"   Final Equity: ${end_equity:,.2f}")
+        print(f"   Net PnL: ${pnl:,.2f} ({ret:.2f}%)")
+        print(f"   Total Trades: {len(self.trades)}")
+        print(f"-------------------")

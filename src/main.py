@@ -11,8 +11,11 @@ from src.data import DataManager
 from src.execution import ExecutionHandler
 from src.risk import RiskManager
 
-# Dynamic Strategy Import (Change this line to swap strategies)
-from strategies.kalman_strategy import KalmanPairStrategy 
+# --- STRATEGY LOADER ---
+# TODO: Import your specific strategy class here when ready.
+# For now, we assume a standard interface.
+# from strategies.my_strategy import MyStrategy 
+from strategies.base import StrategySignal # Assuming base exists, or similar
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s')
@@ -28,11 +31,12 @@ class TradingEngine:
         self.risk = RiskManager()
         
         # 2. STRATEGY (The Brain)
-        # We initialize it with the Instruments and Config Parameters
-        self.strategy = KalmanPairStrategy(config.INSTRUMENTS, config.STRATEGY_PARAMS)
+        # Placeholder: Initialize your strategy here
+        # self.strategy = MyStrategy(config.INSTRUMENTS, config.STRATEGY_PARAMS)
+        self.strategy = None 
+        logger.warning("⚠️ No Strategy Loaded. Engine is in 'Data-Only' mode.")
         
         logger.info(f"🤖 BLUEGREY ENGINE INITIALIZED.")
-        logger.info(f"   Strategy: {self.strategy.__class__.__name__}")
         logger.info(f"   Universe: {list(config.INSTRUMENTS.keys())}")
 
     def start(self):
@@ -47,6 +51,11 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"❌ Connection Failed: {e}")
             return
+
+        # --- BIND EVENTS (CRITICAL FOR EXECUTION) ---
+        # Connect the ExecutionHandler to IBKR's feedback loops
+        self.ib.orderStatusEvent += self.executor.on_order_status
+        self.ib.execDetailsEvent += self.executor.on_exec_details
 
         # Start Data Feed
         self.data_manager.subscribe()
@@ -71,10 +80,14 @@ class TradingEngine:
         # 2. HANDLE HEARTBEAT (GAPS)
         if event.gap_detected:
             logger.warning(f"⚠️ Gap Detected ({event.gap_duration}). Resetting Strategy State.")
-            self.strategy.reset()
-            return # Don't trade immediately after a reset
+            if self.strategy:
+                self.strategy.reset()
+            return 
 
-        # 3. RUN STRATEGY (Two Modes)
+        # 3. RUN STRATEGY (If Loaded)
+        if not self.strategy:
+            return
+
         signal = None
         
         # Mode A: New Candle (For Math/Logic Updates)
@@ -113,7 +126,6 @@ class TradingEngine:
         Writes to the dashboard CSV.
         """
         # Implementation of simple CSV logging for Streamlit
-        # (Same as your previous monitor.py logic, just standardized)
         pass
 
 if __name__ == "__main__":
