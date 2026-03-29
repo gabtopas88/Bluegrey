@@ -65,7 +65,7 @@ DATA_DIR.mkdir(exist_ok=True)
 
 # --- DATABASE (ArcticDB) ---
 
-ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=500GB"
+ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=10GB"
 LIBS = {
     "equity_min": "equity.min",
     "fx_min": "fx.min",

@@ -1,7 +1,7 @@
-import pandas as pd
-import numpy as np
+import os
 import logging
 from datetime import timedelta
+import pandas as pd
 from src.store import DataStore
 
 # Minimal Logging for Backtest (Clean Output)
@@ -67,9 +67,12 @@ class VirtualBroker:
             slip = 0.01 * self.slippage_ticks 
             fill_price = price + slip if action == 'BUY' else price - slip
             
-            # COST MODEL
-            commission = max(1.0, qty * self.commission_per_share)
+            # COST MODEL (Handles FX vs Equities)
             cost = fill_price * qty
+            if qty >= 10000:
+                commission = max(2.0, cost * 0.00002) # 0.20 bps for FX
+            else:
+                commission = max(1.0, qty * self.commission_per_share)
             
             if action == 'BUY':
                 self.cash -= (cost + commission)
@@ -94,8 +97,8 @@ class BacktestEngine:
     Simulates the Live Engine's Event Loop over historical data.
     Enforces 'Reset' on data gaps and eliminates Look-Ahead Bias.
     """
-    def __init__(self, strategy_class, instruments, params, start_cap=100000):
-        self.store = DataStore()
+    def __init__(self, strategy_class, instruments, params, data_library: str,start_cap=100000):
+        self.store = DataStore(library_name=data_library) # Pass the target library
         self.instruments = instruments
         self.params = params
         
@@ -124,9 +127,8 @@ class BacktestEngine:
                 return pd.DataFrame() # Return empty on failure
             dfs[key] = df['close'] # Flatten to single price series per asset
             
-        # Merge into Master Price Board
-        # We forward fill NaNs because in real life, the last price persists until a new tick arrives.
-        universe = pd.DataFrame(dfs).fillna(method='ffill')
+        # Merge into Master Price Board (Pandas Deprecation Fix)
+        universe = pd.DataFrame(dfs).ffill()
         
         if universe.empty:
             print("❌ Universe is empty after alignment.")
@@ -139,9 +141,8 @@ class BacktestEngine:
         pending_orders = [] # Orders generated at T, to be filled at T+1
 
         # PERFORMANCE OPTIMIZATION: itertuples() is ~50x faster than iterrows()
-        # row becomes a NamedTuple. Access columns via dot notation or _asdict().
         for row in universe.itertuples():
-            timestamp = row.Index 
+            timestamp = row.Index  # type: ignore
             
             # --- A. CHECK FOR GAPS (The Heartbeat) ---
             if last_time:
@@ -155,16 +156,20 @@ class BacktestEngine:
             last_time = timestamp
 
             # Prepare data for Strategy/Broker (Convert NamedTuple to Dict)
-            # We remove the Index from the dict to keep it clean
-            market_snapshot = row._asdict()
+            market_snapshot = row._asdict()  # type: ignore
             del market_snapshot['Index']
 
             # --- B. EXECUTION PHASE (Fill orders from PREVIOUS tick) ---
             if pending_orders:
                 fills = self.broker.execute(pending_orders, market_snapshot)
+                
+                filled_keys = []
                 for fill in fills:
                     self.trades.append({**fill, 'time': timestamp})
-                pending_orders = []
+                    filled_keys.append(fill['asset'])
+                
+                # Keep orders that were NOT filled yet
+                pending_orders = [o for o in pending_orders if o['key'] not in filled_keys]
 
             # --- C. STRATEGY PHASE (Generate signals based on CURRENT prices) ---
             # Strategies expect a dict {Key: Price}
@@ -180,7 +185,7 @@ class BacktestEngine:
 
                 # 2. Queue Orders for NEXT tick
                 if signal.orders:
-                    pending_orders = signal.orders
+                    pending_orders.extend(signal.orders)
 
             # --- E. REPORTING ---
             self.broker.mark_to_market(market_snapshot, timestamp)
@@ -191,8 +196,9 @@ class BacktestEngine:
         return pd.DataFrame(self.broker.equity_curve).set_index('time')
 
     def _generate_tearsheet(self):
-        """Prints a quick summary of performance."""
+        """Prints a quick summary and generates a professional QuantStats Tearsheet."""
         if not self.broker.equity_curve:
+            print("⚠️ No trades executed. Equity curve is empty.")
             return
             
         start_equity = self.broker.initial_capital
@@ -200,9 +206,41 @@ class BacktestEngine:
         pnl = end_equity - start_equity
         ret = (pnl / start_equity) * 100
         
-        print(f"📊 --- RESULTS ---")
+        print("\n📊 --- QUICK RESULTS ---")
         print(f"   Initial Cap: ${start_equity:,.2f}")
         print(f"   Final Equity: ${end_equity:,.2f}")
         print(f"   Net PnL: ${pnl:,.2f} ({ret:.2f}%)")
         print(f"   Total Trades: {len(self.trades)}")
-        print(f"-------------------")
+        print("-------------------------\n")
+
+        print("📈 Generating Institutional Tearsheet (quantstats)...")
+        try:
+            import quantstats as qs
+            
+            # 1. Convert equity curve to DataFrame
+            df = pd.DataFrame(self.broker.equity_curve)
+            df.set_index('time', inplace=True)
+            
+            # 2. Resample to Daily Equity (Quantstats expects daily data)
+            daily_equity = df['equity'].resample('D').last().dropna()
+            
+            # 3. Calculate Daily Returns (Percentage change)
+            returns = daily_equity.pct_change().dropna()
+            
+            # SAFETY CHECK (Prevent Zero-Variance Crash)
+            if returns.std() == 0:
+                print("⚠️ Returns volatility is zero (no active trades). Skipping Tearsheet.")
+                return
+            
+            # 4. Generate the HTML Report
+            os.makedirs("research", exist_ok=True) # Ensure the research folder exists
+            report_path = "research/backtest_tearsheet.html"
+            
+            qs.reports.html(returns, output=report_path, title="Bluegrey Strategy Tearsheet")
+            print(f"✅ Tearsheet saved successfully to: {report_path}")
+            print("   (Open this file in your web browser to view Sharpe, Drawdowns, etc.)")
+            
+        except ImportError:
+            print("⚠️ QuantStats not installed. Run 'pip install quantstats' for full tearsheet.")
+        except Exception as e:
+            print(f"⚠️ Could not generate tearsheet: {e}")

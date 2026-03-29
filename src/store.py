@@ -11,7 +11,7 @@ class DataStore:
     Handles saving historical data and retrieving it for backtesting.
     Now strictly follows src/config.py for paths.
     """
-    def __init__(self, library_name=LIBS["equity_min"]):
+    def __init__(self, library_name: str):
         # 1. Connect using the Central Config
         try:
             self.arctic = adb.Arctic(ARCTIC_PATH)
