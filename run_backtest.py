@@ -1,4 +1,4 @@
-from src.backtester import BacktestEngine
+from event_backtester import BacktestEngine
 
 # 🧠 1. The Strategy
 # (Once your plumbing is confirmed, you will import your KalmanPairStrategy here)

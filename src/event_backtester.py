@@ -27,7 +27,7 @@ class VirtualBroker:
     def mark_to_market(self, prices, timestamp):
         """
         Calculates total Liquidation Value of the portfolio.
-        CRITICAL FIX: Uses last known price if current price is missing (NaN).
+        Uses last known price if current price is missing (NaN).
         """
         # Update price cache with valid new data
         for key, price in prices.items():
@@ -118,7 +118,7 @@ class BacktestEngine:
     def run(self, start_date, end_date):
         print(f"⏳ Loading Data for {len(self.instruments)} assets ({start_date} to {end_date})...")
         
-        # 1. LOAD & ALIGN DATA
+        # 1. LOAD & ALIGN FULL OHLCV DATA
         dfs = {}
         for key in self.instruments.keys():
             df = self.store.load(key, start_date, end_date)
@@ -127,12 +127,19 @@ class BacktestEngine:
                 return pd.DataFrame() # Return empty on failure
             dfs[key] = df['close'] # Flatten to single price series per asset
             
-        # Merge into Master Price Board (Pandas Deprecation Fix)
-        universe = pd.DataFrame(dfs).ffill()
+            # Keep all relevant columns
+            dfs[key] = df[['open', 'high', 'low', 'close', 'volume']]
+        
+        # Create a unified MultiIndex DataFrame and forward fill gaps
+        universe = pd.concat(dfs, axis=1).ffill()
         
         if universe.empty:
             print("❌ Universe is empty after alignment.")
             return pd.DataFrame()
+        
+        # Cache the MultiIndex columns before the loop starts
+        # Example: [('C:EURUSD', 'open'), ('C:EURUSD', 'high'), ...]
+        cols = universe.columns
 
         print(f"▶️ Simulating {len(universe)} ticks...")
 
@@ -141,8 +148,8 @@ class BacktestEngine:
         pending_orders = [] # Orders generated at T, to be filled at T+1
 
         # PERFORMANCE OPTIMIZATION: itertuples() is ~50x faster than iterrows()
-        for row in universe.itertuples():
-            timestamp = row.Index  # type: ignore
+        for row in universe.itertuples(index=True, name=None):
+            timestamp = row[0]
             
             # --- A. CHECK FOR GAPS (The Heartbeat) ---
             if last_time:
@@ -155,35 +162,44 @@ class BacktestEngine:
             
             last_time = timestamp
 
-            # Prepare data for Strategy/Broker (Convert NamedTuple to Dict)
-            market_snapshot = row._asdict()  # type: ignore
-            del market_snapshot['Index']
+            # --- B. CONSTRUCT STRATEGY PAYLOAD ---
+            bar_dict = {}
+            market_snapshot = {}
+            
+            # Map the raw tuple values back to their Asset and Metric
+            # row[1:] slices off the timestamp to match the 'cols' array perfectly
+            for i, (asset, metric) in enumerate(cols):
+                val = row[i+1]
+                
+                if asset not in bar_dict:
+                    bar_dict[asset] = {}
+                bar_dict[asset][metric] = val
+                
+                if metric == 'close':
+                    market_snapshot[asset] = val
+            
+            # Build the DataFrame from a native dict (Much faster than unstacking a Series)
+            latest_bars = pd.DataFrame.from_dict(bar_dict, orient='index')
+            latest_bars['time'] = timestamp
 
-            # --- B. EXECUTION PHASE (Fill orders from PREVIOUS tick) ---
+            # --- C. EXECUTION PHASE ---
             if pending_orders:
                 fills = self.broker.execute(pending_orders, market_snapshot)
-                
                 filled_keys = []
                 for fill in fills:
                     self.trades.append({**fill, 'time': timestamp})
                     filled_keys.append(fill['asset'])
-                
-                # Keep orders that were NOT filled yet
                 pending_orders = [o for o in pending_orders if o['key'] not in filled_keys]
 
-            # --- C. STRATEGY PHASE (Generate signals based on CURRENT prices) ---
-            # Strategies expect a dict {Key: Price}
-            signal = self.strategy.on_tick(market_snapshot)
+            # --- D. STRATEGY PHASE ---
+            signal = self.strategy.on_bar(latest_bars)
             
-            # --- D. RECORDING (Do NOT execute yet) ---
+            # --- E. RECORDING ---
             if signal:
-                # 1. Store Metadata 
                 if signal.meta:
                     record = signal.meta.copy()
                     record['timestamp'] = timestamp
                     self.history.append(record)
-
-                # 2. Queue Orders for NEXT tick
                 if signal.orders:
                     pending_orders.extend(signal.orders)
 

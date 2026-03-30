@@ -49,6 +49,7 @@ class DataManager:
         
         # Global Heartbeat (Tracks the very last time we heard from *any* asset)
         self.system_last_time = None
+        self.current_minute = None
 
     def subscribe(self):
         logger.info("📡 Subscribing to Market Data...")
@@ -69,7 +70,9 @@ class DataManager:
         Returns a DataEvent summary.
         """
         event = DataEvent()
-        
+        # Identify the latest timestamp in this batch of ticks
+        batch_latest_time = None
+
         for t in tickers:
             key = self.conid_to_key.get(t.contract.conId)
             if not key: continue
@@ -80,6 +83,8 @@ class DataManager:
             # Validations
             if not tick_time or price is None or np.isnan(price) or price <= 0:
                 continue
+            if not batch_latest_time or tick_time > batch_latest_time:
+                batch_latest_time = tick_time
                 
             # 1. GAP DETECTION (Heartbeat)
             # We check if this new tick is significantly later than the last system activity
@@ -96,69 +101,54 @@ class DataManager:
             self.last_prices[key] = price
             event.has_new_tick = True
 
-            # 2. TICK AGGREGATION (Building the Candle)
-            self._aggregate_bar(key, price, tick_time, event)
+            # Update the pending bar for this specific asset
+            self._update_pending_bar(key, price, tick_time)
+        
+        # --- THE SYSTEM CLOCK ---
+        # Guarantees the strategy never receives misaligned timestamps
+        if batch_latest_time:
+            tick_minute = batch_latest_time.replace(second=0, microsecond=0)
+            
+            if self.current_minute is None:
+                self.current_minute = tick_minute
+                
+            # If the global clock rolled over to a new minute...
+            elif tick_minute > self.current_minute:
+                self._finalize_all_bars()
+                self.current_minute = tick_minute
+                event.has_new_bar = True
 
         return event
 
-    def _aggregate_bar(self, key, price, time, event):
-        """
-        Aggregates ticks into 1-minute bars.
-        If a minute closes, it finalizes the bar and updates 'latest_bars'.
-        """
-        # Determine the 'Bin' for this tick (e.g., 10:05:23 -> 10:05:00)
-        current_bar_start = time.replace(second=0, microsecond=0)
-        
+    def _update_pending_bar(self, key, price, time):
+        """Updates the running candle. Does NOT finalize it."""
         current_bar = self.pending_bars.get(key)
 
-        # CASE A: First tick ever for this asset
         if current_bar is None:
-            self._start_new_bar(key, price, current_bar_start)
-            return
-
-        # CASE B: Still in the same minute -> Update High/Low/Close
-        if current_bar['start_time'] == current_bar_start:
+            self.pending_bars[key] = {
+                'start_time': self.current_minute if self.current_minute else time.replace(second=0, microsecond=0),
+                'open': price, 'high': price, 'low': price, 'close': price, 'volume': 1
+            }
+        else:
             current_bar['high'] = max(current_bar['high'], price)
             current_bar['low'] = min(current_bar['low'], price)
             current_bar['close'] = price
-            current_bar['volume'] += 1 # We use tick count as volume proxy for now
-            
-        # CASE C: New Minute Detected -> Close old bar, Start new one
-        elif current_bar_start > current_bar['start_time']:
-            # 1. Finalize the old bar
-            self._finalize_bar(key, current_bar)
-            event.has_new_bar = True
-            
-            # 2. Start the new bar
-            self._start_new_bar(key, price, current_bar_start)
-            
-        # CASE D: Late Tick (Timestamp older than current bar) -> Ignore or Log
-        else:
-            # This happens with out-of-order UDP packets. Safest to ignore for bar building.
-            pass
+            current_bar['volume'] += 1
 
-    def _start_new_bar(self, key, price, start_time):
-        self.pending_bars[key] = {
-            'start_time': start_time,
-            'open': price,
-            'high': price,
-            'low': price,
-            'close': price,
-            'volume': 1
-        }
-
-    def _finalize_bar(self, key, bar_dict):
+    def _finalize_all_bars(self):
         """
-        Push the completed bar to the 'latest_bars' dataframe.
+        FIX: Sweeps all pending bars across ALL assets simultaneously 
+        and commits them to the latest_bars dataframe.
         """
-        self.latest_bars.loc[key] = [
-            bar_dict['open'],
-            bar_dict['high'],
-            bar_dict['low'],
-            bar_dict['close'],
-            bar_dict['volume'],
-            bar_dict['start_time']
-        ]
+        for key, bar_dict in self.pending_bars.items():
+            if bar_dict is not None:
+                self.latest_bars.loc[key] = [
+                    bar_dict['open'], bar_dict['high'], bar_dict['low'], 
+                    bar_dict['close'], bar_dict['volume'], bar_dict['start_time']
+                ]
+        # Reset pending bars for the next minute
+        for key in self.pending_bars.keys():
+            self.pending_bars[key] = None
 
     def get_latest_prices(self):
         """Used for On_Tick execution logic"""
