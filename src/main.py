@@ -74,6 +74,14 @@ class TradingEngine:
         # 1. INGEST & CHECK HEALTH
         event = self.data_manager.on_tick(tickers)
         
+        # --- RISK HEARTBEAT ---
+        # Pings the Risk Manager with the latest equity state.
+        # (Future: Link this to self.ib.accountSummary() for live IBKR data)
+        self.risk.update_state(
+            current_equity=100000.0, 
+            start_of_day_equity=100000.0
+        )
+        
         if not self.data_manager.is_ready():
             return
 

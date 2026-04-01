@@ -3,6 +3,7 @@ import logging
 from datetime import timedelta
 import pandas as pd
 from src.store import DataStore
+from src.risk import RiskManager
 
 # Minimal Logging for Backtest (Clean Output)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -52,7 +53,7 @@ class VirtualBroker:
         """
         fills = []
         for order in orders:
-            key = order['key'] 
+            key = order.get('symbol', order.get('key'))
             action = order['action'] # BUY/SELL
             qty = order['qty']
             
@@ -107,6 +108,10 @@ class BacktestEngine:
         
         # The Accountant
         self.broker = VirtualBroker(start_cap)
+        self.risk = RiskManager()
+        
+        # Important: Turn off the physical time velocity lock for backtests
+        self.risk.max_orders_per_minute = float('inf') 
         
         # Results Buffers
         self.trades = []
@@ -189,7 +194,7 @@ class BacktestEngine:
                 for fill in fills:
                     self.trades.append({**fill, 'time': timestamp})
                     filled_keys.append(fill['asset'])
-                pending_orders = [o for o in pending_orders if o['key'] not in filled_keys]
+                pending_orders = [o for o in pending_orders if o.get('symbol', o.get('key')) not in filled_keys]
 
             # --- D. STRATEGY PHASE ---
             signal = self.strategy.on_bar(latest_bars)
@@ -200,10 +205,18 @@ class BacktestEngine:
                     record = signal.meta.copy()
                     record['timestamp'] = timestamp
                     self.history.append(record)
+                    
                 if signal.orders:
-                    pending_orders.extend(signal.orders)
+                    current_eq = self.broker.equity_curve[-1]['equity'] if self.broker.equity_curve else self.broker.initial_capital
+                    self.risk.update_state(
+                        current_equity=current_eq,
+                        start_of_day_equity=self.broker.initial_capital 
+                    )
+                    
+                    if self.risk.check(signal, current_time=timestamp.timestamp()):
+                        pending_orders.extend(signal.orders)
 
-            # --- E. REPORTING ---
+            # --- F. REPORTING ---
             self.broker.mark_to_market(market_snapshot, timestamp)
 
         print("✅ Backtest Complete.")
@@ -241,7 +254,7 @@ class BacktestEngine:
             daily_equity = df['equity'].resample('D').last().dropna()
             
             # 3. Calculate Daily Returns (Percentage change)
-            returns = daily_equity.pct_change().dropna()
+            returns = daily_equity.pct_change(fill_method=None).dropna()
             
             # SAFETY CHECK (Prevent Zero-Variance Crash)
             if returns.std() == 0:
@@ -249,8 +262,8 @@ class BacktestEngine:
                 return
             
             # 4. Generate the HTML Report
-            os.makedirs("research", exist_ok=True) # Ensure the research folder exists
-            report_path = "research/backtest_tearsheet.html"
+            os.makedirs("research/Tearsheets", exist_ok=True) 
+            report_path = "research/Tearsheets/event_backtest_tearsheet.html"
             
             qs.reports.html(returns, output=report_path, title="Bluegrey Strategy Tearsheet")
             print(f"✅ Tearsheet saved successfully to: {report_path}")
