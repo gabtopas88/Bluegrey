@@ -1,70 +1,60 @@
-from ib_async import Stock, Future, Forex, Contract
+import os
+from pathlib import Path
+from ib_async import Stock, Future, Forex, Crypto, Contract
 
 # --- CONNECTIVITY ---
 IB_PORT = 7497
 IB_CLIENT_ID = 202
 ACCOUNT_ID = "" 
 
-# --- THE UNIVERSE (Asset Agnostic) ---
-# We map a human-readable "Key" to a specific IBKR Contract Object.
-# This allows us to trade Stocks, Futures, and FX simultaneously.
+# ==========================================
+# 🌍 UNIVERSES (Easy to edit, highly scalable)
+# ==========================================
+# Just type the plain string tickers here. Your team can easily 
+# swap these out, or eventually load them from a CSV/Database.
 
-INSTRUMENTS = {
-    
-    # --- TECH GIANTS (The "Mag 7" & Friends) ---
-    'MSFT_STK': Stock('MSFT', 'SMART', 'USD'),
-    'GOOG_STK': Stock('GOOG', 'SMART', 'USD'),
-    'GOOGL_STK': Stock('GOOGL', 'SMART', 'USD'), # Class arb
-    'META_STK': Stock('META', 'SMART', 'USD'),
-    'NVDA_STK': Stock('NVDA', 'SMART', 'USD'),
-    'AMD_STK':  Stock('AMD', 'SMART', 'USD'),    # Semis pair
-    
-    # --- ENERGY MAJORS (Classic Mean Reversion) ---
-    'XOM_STK': Stock('XOM', 'SMART', 'USD'),
-    'CVX_STK': Stock('CVX', 'SMART', 'USD'),
-    'OXY_STK': Stock('OXY', 'SMART', 'USD'),
-    'COP_STK': Stock('COP', 'SMART', 'USD'),
-    
-    # --- BANKING (Interest Rate correlation) ---
-    'JPM_STK': Stock('JPM', 'SMART', 'USD'),
-    'BAC_STK': Stock('BAC', 'SMART', 'USD'),
-    'GS_STK':  Stock('GS', 'SMART', 'USD'),
-    'MS_STK':  Stock('MS', 'SMART', 'USD'),
+UNIVERSE_FX = ['EURUSD', 'GBPUSD', 'AUDUSD', 'NZDUSD', 'USDJPY']
+UNIVERSE_TECH = ['MSFT', 'GOOGL', 'META', 'NVDA', 'AAPL', 'AMZN']
+UNIVERSE_ENERGY = ['XOM', 'CVX', 'OXY', 'COP']
 
-    # --- FX (The "Aussie-Kiwi" Pair and EUR/GBP) ---
-    'AUDUSD_FX': Forex('AUDUSD'),
-    'NZDUSD_FX': Forex('NZDUSD'),
-    'GBPUSD_FX': Forex('GBPUSD'),
-    'EURUSD_FX': Forex('EURUSD'),
-}
-    # Example of how you WOULD add other assets (commented out for now):
-    # 'ES_FUT': Future('ES', '20250320', 'CME'), 
-    # 'EUR_USD': Forex('EURUSD')
+# ==========================================
+# 🏭 THE CONTRACT FACTORY
+# ==========================================
+def build_contract(symbol: str, asset_class: str) -> Contract:
+    """Dynamically builds IBKR Contract objects based on asset class rules."""
+    if asset_class == 'FX':
+        return Forex(symbol)
+    elif asset_class == 'STK':
+        return Stock(symbol, 'SMART', 'USD')
+    elif asset_class == 'CRYPTO':
+        return Crypto(symbol, 'PAXOS', 'USD')
+    else:
+        raise ValueError(f"Unknown asset class: {asset_class}")
+
+# --- BUILD THE ACTIVE INSTRUMENT MAP DYNAMICALLY ---
+# This automatically generates the dictionary your Engine expects,
+# combining whatever universes you want to trade today.
+
+INSTRUMENTS = {}
+INSTRUMENTS.update({f"{sym}_FX": build_contract(sym, 'FX') for sym in UNIVERSE_FX})
+INSTRUMENTS.update({f"{sym}_STK": build_contract(sym, 'STK') for sym in UNIVERSE_TECH})
+# To add energy, just uncomment:
+# INSTRUMENTS.update({f"{sym}_STK": build_contract(sym, 'STK') for sym in UNIVERSE_ENERGY})
 
 
 # --- STRATEGY SETTINGS ---
-STRATEGY_CLASS = "KalmanPairStrategy" # For dynamic loading later
-STRATEGY_PARAMS = {} #To Be Completed.
-
+STRATEGY_CLASS = "KalmanPairStrategy" 
+STRATEGY_PARAMS = {} 
 
 # ==========================================
-# 🏗️ BLUEGREY INFRASTRUCTURE (ADDED)
+# 🏗️ BLUEGREY INFRASTRUCTURE 
 # ==========================================
-import os
-from pathlib import Path
-
-# --- PATHS ---
-# Defines the absolute path to the project root
-# (Assumes config.py is inside /src, so we go up one level)
 SRC_DIR = Path(__file__).parent.resolve()
 ROOT_DIR = SRC_DIR.parent
 DATA_DIR = ROOT_DIR / "data"
-
-# Ensure data directory exists
 DATA_DIR.mkdir(exist_ok=True)
 
 # --- DATABASE (ArcticDB) ---
-
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=10GB"
 LIBS = {
     "equity_min": "equity.min",
@@ -73,9 +63,4 @@ LIBS = {
 }
 
 # --- DATA VENDORS ---
-# Polygon.io API Key
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
-
-# --- MAPPINGS ---
-# We will eventually map your IBKR 'INSTRUMENTS' keys to Polygon tickers here.
-# For now, auto-discovery handles the FX.
