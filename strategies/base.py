@@ -11,11 +11,11 @@ class StrategySignal:
     orders: List[Dict[str, Any]] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
 
-    def add_order(self, contract, action: str, qty: int, order_type: str = 'MKT', estimated_price: float = 1.0):
+    def add_order(self, contract, action: str, qty: int, order_type: str = 'MKT', estimated_price: float = 1.0, volatility: float = None):
         """
         Helper method to guarantee all orders have the exact keys required by the Risk Manager.
+        :param volatility: The expected price move per share (e.g., current ATR). Critical for Vol-Targeting.
         """
-        # Safely extract the symbol whether it's an IBKR Contract or a backtest string
         symbol = contract.localSymbol if hasattr(contract, 'localSymbol') else str(contract)
         
         self.orders.append({
@@ -24,7 +24,8 @@ class StrategySignal:
             'action': action.upper(),
             'qty': qty,
             'type': order_type.upper(),
-            'estimated_price': estimated_price
+            'estimated_price': estimated_price,
+            'volatility': volatility
         })
 
 class BaseStrategy:
