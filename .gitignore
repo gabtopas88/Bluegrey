@@ -1,19 +1,30 @@
-# --- Python Garbage ---
+# --- Python Cache ---
 __pycache__/
 *.py[cod]
 *$py.class
 .ipynb_checkpoints/
 
-# --- Environment ---
+# --- Environment & Secrets ---
 .env
-.venv
+.venv/
 env/
 venv/
+keys.json
 
 # --- DATA (CRITICAL: DO NOT SYNC THIS) ---
 data/
+arctic_db/
 *.log
 *.csv
+*.h5
+*.parquet
+*.db
+*.sqlite3
+
+# --- Outputs, Tearsheets & Bundles ---
+research/Tearsheets/
+*.html
+repomix-output.xml
 
 # --- IDE Settings ---
 .vscode/
