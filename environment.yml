@@ -2,10 +2,14 @@ name: bluegrey_env
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.11.9
   - pip
   - pytest
   - black
   - jupyterlab
+  - arcticdb=6.11.1
+  - pyarrow=23.0.*
+  - protobuf=6.33.5
+  - libprotobuf=6.33.5
   - pip:
       - -r requirements.txt
