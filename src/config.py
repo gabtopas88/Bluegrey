@@ -36,8 +36,9 @@ def build_contract(symbol: str, asset_class: str) -> Contract:
 # combining whatever universes you want to trade today.
 
 INSTRUMENTS = {}
-INSTRUMENTS.update({f"{sym}_FX": build_contract(sym, 'FX') for sym in UNIVERSE_FX})
-INSTRUMENTS.update({f"{sym}_STK": build_contract(sym, 'STK') for sym in UNIVERSE_TECH})
+#INSTRUMENTS.update({f"{sym}_FX": build_contract(sym, 'FX') for sym in UNIVERSE_FX})
+INSTRUMENTS.update({f"C:{sym}": build_contract(sym, 'FX') for sym in UNIVERSE_FX})
+#INSTRUMENTS.update({f"{sym}_STK": build_contract(sym, 'STK') for sym in UNIVERSE_TECH})
 # To add energy, just uncomment:
 # INSTRUMENTS.update({f"{sym}_STK": build_contract(sym, 'STK') for sym in UNIVERSE_ENERGY})
 
