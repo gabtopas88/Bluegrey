@@ -14,8 +14,8 @@ from src.live.risk import RiskManager
 # --- STRATEGY LOADER ---
 # TODO: Import your specific strategy class here when ready.
 # For now, we assume a standard interface.
-# from strategies.my_strategy import MyStrategy 
-from strategies.base import StrategySignal # Assuming base exists, or similar
+# from src.strategies.my_strategy import MyStrategy 
+from src.strategies.base import StrategySignal # Assuming base exists, or similar
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s')
