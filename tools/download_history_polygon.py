@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # --- IMPORT FIX ---
-# Add the project root to sys.path so we can import 'src.config'
+# Add the project root to sys.path so we can import 'src.infra.config'
 # We assume this script is in /Bluegrey/tools/
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 sys.path.append(str(ROOT_DIR))
@@ -19,7 +19,7 @@ from polygon import RESTClient
 from arcticdb import Arctic
 
 # Import the Unified Config
-import src.config as config
+import src.infra.config as config
 
 # --- SETUP LOGGING ---
 logging.basicConfig(

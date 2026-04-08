@@ -60,19 +60,19 @@ git push -u origin Structure_change_ProdExp_changes
 
 ## Compatibility policy during migration
 
-Keep wrappers in root `src/` temporarily (re-export new module paths) to avoid breaking notebooks and scripts.
+Wrappers in root `src/` were used only during transition and are now removed.
 
-Required wrappers:
+Use these module paths directly:
 
-- `src/main.py` -> `src.live.main`
-- `src/data.py` -> `src.live.data`
-- `src/risk.py` -> `src.live.risk`
-- `src/execution.py` -> `src.live.execution`
-- `src/event_backtester.py` -> `src.backtest.event_backtester`
-- `src/vector_backtester.py` -> `src.backtest.vector_backtester`
-- `src/optimizer.py` -> `src.backtest.optimizer`
-- `src/config.py` -> `src.infra.config`
-- `src/store.py` -> `src.infra.store`
+- `src.live.main`
+- `src.live.data`
+- `src.live.risk`
+- `src.live.execution`
+- `src.backtest.event_backtester`
+- `src.backtest.vector_backtester`
+- `src.backtest.optimizer`
+- `src.infra.config`
+- `src.infra.store`
 
 ## PR slicing strategy
 
@@ -82,7 +82,7 @@ Use small PRs to reduce risk:
 2. Live move + import updates
 3. Backtest move + import updates
 4. Tools/notebooks import updates
-5. Cleanup PR: remove wrappers after downstream migration
+5. Cleanup PR: remove wrappers after downstream migration ✅ completed
 
 ## Validation checklist (must pass)
 
