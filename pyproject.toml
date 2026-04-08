@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 
 # CORE INGREDIENTS ONLY
-# These are required for 'src' and 'strategies' to function.
+# These are required for the application package in 'src'.
 dependencies = [
     "ib_async",         # Connection to IBKR
     "pandas",           # Data handling
@@ -28,6 +28,6 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]  
-# We only package the "Engine" (src) and "Logic" (strategies).
+# We package everything under "src" (engine + strategies).
 # We exclude "research", "tools", and "dashboard" because they are scripts, not libraries.
-include = ["src*", "strategies*"]
+include = ["src*"]
