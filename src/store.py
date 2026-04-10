@@ -64,5 +64,12 @@ class DataStore:
             df = df[df.index >= start_date]
         if end_date:
             df = df[df.index <= end_date]
-            
+
+        """
+        To employ ArcticDB slicing (faster), use:
+        (should work even if either is 'None' by default)
+        """
+        # item = self.lib.read(key, date_range=(start_date, end_date))
+        # df = item.data
+        
         return df

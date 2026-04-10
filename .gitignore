@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# --- Jupyter ---
 .ipynb_checkpoints/
 
 # --- Environment & Secrets ---
@@ -34,3 +36,29 @@ repomix-output.xml
 build/
 dist/
 *.egg-info/
+
+# --- macOS ---
+.DS_Store
+
+
+########################################
+# --- Suggested by ChatGPT ---
+
+# Pyenv / local env names
+bluegrey-env/
+
+# Conda local exports you may not want to share
+environment-mateo.yml
+
+# Git workflow helper
+git_workflow_helper.ipynb
+
+# VS Code workspace settings
+*.code-workspace
+
+# Editable install of Bluegrey to enable imports from it
+bluegrey.egg-info/
+
+# Copy to upload to ChatGPT without data folder
+Bluegrey-chatgpt/
+Bluegrey-chatgpt.zip

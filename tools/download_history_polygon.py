@@ -3,7 +3,7 @@ tools/download_history_polygon.py
 Institutional-Grade Data Ingestion Engine (Polygon.io -> ArcticDB)
 """
 import sys
-import os
+import os  # -- this isn't being used
 from pathlib import Path
 
 # --- IMPORT FIX ---
@@ -11,6 +11,32 @@ from pathlib import Path
 # We assume this script is in /Bluegrey/tools/
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 sys.path.append(str(ROOT_DIR))
+
+"""
+Mateo's way to ensure src.config is found without assuming this script is Bluegrey/tools/ 
+"""
+"""
+# --- import ArcticDB module for client setup ---
+from arcticdb import Arctic
+
+# --- Modules to manage directories and paths ---
+from pathlib import Path # -- for handling filesystem paths
+import sys # -- for managing the Python path to ensure project modules can be imported
+
+# --- Ensure repo root is on sys.path so that src/config.py can be imported ---
+ROOT_DIR = Path.cwd()
+
+while not (ROOT_DIR / "src").exists(): # -- traverse up the directory tree until we find a directory containing 'src/'
+    if ROOT_DIR.parent == ROOT_DIR: # -- if we reach the root of the filesystem without finding 'src/', raise an error and exit to avoid infinite loop
+        raise RuntimeError("Could not find repo root containing 'src/'")
+    ROOT_DIR = ROOT_DIR.parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR)) # -- add repo root to sys.path at the start (to be read first) for module imports
+
+# --- Now safe to import project config ---
+import src.config as config
+"""
 
 import logging
 import pandas as pd
@@ -33,10 +59,44 @@ logging.basicConfig(
 logger = logging.getLogger("DataFactory")
 
 class PolygonIngestor:
-    def __init__(self):
+    def __init__(self, market="fx", freq="min", multiplier=1, initial_date="2020-01-01", final_date=str(date.today())):
         self.client = RESTClient(config.POLYGON_API_KEY)
         self.store = Arctic(config.ARCTIC_PATH)
-        self.fx_lib = self._get_library(config.LIBS["fx_min"])
+        self.freq = freq
+        self.multiplier = multiplier
+        self.initial_date = initial_date
+        self.final_date = final_date
+
+        FREQ_MAP = {
+            "sec": "second",
+            "min": "minute",
+            "hour": "hour",
+            "day": "day",
+            "week": "week",
+            "month": "month",
+            "quarter": "quarter",
+            "year": "year"
+        }
+        if freq not in FREQ_MAP:
+            raise ValueError(f"Unsupported freq: {freq}. Supported: {list(FREQ_MAP.keys())}")
+        
+        MARKET_MAP = {
+            "fx": "fx",
+            "crypto": "crypto",
+            "equity": "stocks",
+            "options": "otc",
+            "indices": "indices"
+        }
+        if market not in MARKET_MAP:
+            raise ValueError(f"Unsupported market: {market}. Supported: {list(MARKET_MAP.keys())}")
+
+        self.timespan = FREQ_MAP[freq]
+        self.market = MARKET_MAP[market]
+        
+        self.lib = self._get_library(config.LIBS[f"{market}_{freq}"])
+
+
+
         
     def _get_library(self, lib_name):
         if lib_name not in self.store.list_libraries():
@@ -56,6 +116,19 @@ class PolygonIngestor:
             for t in self.client.list_tickers(market="fx", active=True, limit=1000):
                 tickers.append(t.ticker)
             logger.info(f"Discovery Complete: Found {len(tickers)} active FX pairs.")
+            return tickers
+        except Exception as e:
+            logger.critical(f"Failed to fetch ticker list: {e}")
+            return []
+        
+    def fetch_all_tickers(self):
+        logger.info(f"Querying Polygon for all active {self.market} tickers...")
+        tickers = []
+        try:
+            # Iterate through all tickers where market is 'self.market' and active is True
+            for t in self.client.list_tickers(market=self.market, active=True, limit=1000):
+                tickers.append(t.ticker)
+            logger.info(f"Discovery Complete: Found {len(tickers)} active {self.market} tickers.")
             return tickers
         except Exception as e:
             logger.critical(f"Failed to fetch ticker list: {e}")
@@ -101,20 +174,24 @@ class PolygonIngestor:
             logger.critical(f"Failed to fetch ticker list: {e}")
             return []
 
-    def download_ticker(self, ticker, start_year=2020):
+    def download_ticker(self, ticker):
         """
         Downloads history. Handles missing Volume/VWAP gracefully.
         Smart-Switch between WRITE (for new) and UPDATE (for existing).
         """
+        
+        start_date=self.initial_date
+        end_date=self.final_date
+        
         try:
             # 1. Fetch Data
             aggs = []
             for a in self.client.list_aggs(
                 ticker=ticker,
-                multiplier=1,
-                timespan="minute",
-                from_=f"{start_year}-01-01",
-                to=str(date.today()),
+                multiplier=self.multiplier,
+                timespan=self.timespan,
+                from_=start_date,
+                to=end_date,
                 limit=50000
             ):
                 aggs.append(a)
@@ -142,11 +219,11 @@ class PolygonIngestor:
             df = df[~df.index.duplicated(keep='last')]
 
             # 3. Write to Vault
-            if self.fx_lib.has_symbol(ticker):
-                self.fx_lib.update(ticker, df)
+            if self.lib.has_symbol(ticker):
+                self.lib.update(ticker, df)
                 action = "Updated"
             else:
-                self.fx_lib.write(ticker, df)
+                self.lib.write(ticker, df)
                 action = "Created"
             
             print(f"✅ {action} {ticker}: {len(df)} bars.")
@@ -173,8 +250,37 @@ class PolygonIngestor:
             print(f"[{i+1}/{len(all_tickers)}] ", end="")
             self.download_ticker(ticker)
 
+    def run_bulk(self):
+        """
+        Main execution flow for Bulk market data Download.
+        """
+        if self.market == "fx":
+            all_tickers = self.fetch_liquid_fx_tickers()   # OPTION A: Institutional Filter (Current)
+            # all_tickers = self.fetch_all_fx_tickers()    # OPTION B: Download Everything (Uncomment to use)
+        # elif self.market == "crypto":
+        else:
+            all_tickers = self.fetch_all_tickers()
+        # else:
+        #     raise ValueError(f"Unsupported market: {self.market}")
+
+        if not all_tickers:
+            logger.error("No tickers to process. Exiting.")
+            return
+
+        logger.info(f"Starting Batch Job for {len(all_tickers)} {self.market} tickers.")
+
+        for i, ticker in enumerate(all_tickers):
+            print(f"[{i+1}/{len(all_tickers)}] ", end="")
+            self.download_ticker(ticker)
+
 if __name__ == "__main__":
-    ingestor = PolygonIngestor()
-    logger.info(f"Ignition: Bluegrey Data Factory. Target: {config.ARCTIC_PATH}")
-    ingestor.run_bulk_fx()
+    
+    # ingestor = PolygonIngestor()  # -- default is FX with liquid filter
+    ingestor = PolygonIngestor(market="indices", freq="day", initial_date="2026-04-01", final_date=str(date.today()))  # -- example for crypto
+    
+    logger.info(f"\nIgnition: Bluegrey Data Factory. Target: {config.ARCTIC_PATH}")
+    
+    # ingestor.run_bulk_fx()  # -- use this for FX with the liquid filter
+    ingestor.run_bulk()
+    
     logger.info("Job Complete.")
