@@ -3,7 +3,7 @@ strategies/base.py
 The immutable contract for all Alpha models across Research and Production.
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 import pandas as pd
 
 @dataclass
@@ -35,7 +35,7 @@ class StrategySignal:
 class BaseStrategy:
     """
     All future strategies MUST inherit from this class.
-    Enforces dual-compatibility for both Vectorized Research and Live Execution.
+    Enforces dual-compatibility for both Vectorized Research (Portfolio/Matrix) and Live Execution.
     """
     def __init__(self, instruments: dict, params: dict):
         self.instruments = instruments
@@ -44,15 +44,17 @@ class BaseStrategy:
     # ==========================================
     # 🔬 RESEARCH INTERFACE (For the Optimizer)
     # ==========================================
-    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+    def generate_signals(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame]]) -> pd.DataFrame:
         """
-        Calculates target weights across the entire historical DataFrame.
-        MUST be implemented for CPCV and Vector Backtesting.
+        Calculates target weights across the entire historical dataset.
+        MUST be implemented for CPCV and Portfolio Vector Backtesting.
         
-        :param df: DataFrame of historical price/volume data.
-        :return: pandas Series of target weights (-1.0 to 1.0)
+        :param data: Can be a MultiIndex DataFrame (Date x Symbol -> Features) 
+                     or a Dictionary of 2D feature matrices (e.g., data['close'], data['volume']).
+        :return: pandas DataFrame of target weights (-1.0 to 1.0). 
+                 Index = Datetime, Columns = Tickers.
         """
-        raise NotImplementedError("Strategy must implement generate_signals() for the Optimizer.")
+        raise NotImplementedError("Strategy must implement generate_signals() returning an N-dimensional DataFrame.")
 
     # ==========================================
     # 🏭 PRODUCTION INTERFACE (For Live/Event)
@@ -61,10 +63,14 @@ class BaseStrategy:
         """Called by the Engine on raw price updates."""
         return StrategySignal(signal_type="NONE")
 
-    def on_bar(self, latest_bars) -> StrategySignal:
-        """Called by the Engine when a new 1-minute OHLCV bar closes."""
+    def on_bar(self, latest_bars: dict) -> StrategySignal:
+        """
+        Called by the Engine when a new bar closes.
+        In a multi-asset setup, 'latest_bars' should be a dictionary mapping 
+        symbols to their most recently closed OHLCV data.
+        """
         return StrategySignal(signal_type="NONE")
 
     def reset(self):
-        """Called when a data gap is detected to clear strategy memory."""
+        """Called when a data gap is detected to clear strategy memory/state."""
         pass

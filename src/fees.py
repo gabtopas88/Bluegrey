@@ -80,46 +80,42 @@ class IBKRFeeModel:
             'total_cost': total_cost
         }
 
-    def calculate_vector(self, asset_class: str, share_diff: pd.Series, prices: pd.Series) -> pd.DataFrame:
+    def calculate_vector_matrix(self, asset_class: str, share_diff: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
         """
-        Vectorized execution logic for millions of rows. 
-        Returns a DataFrame of costs to be subtracted from gross PnL.
-        
-        :param share_diff: pd.Series of the change in shares (Positive = Buy, Negative = Sell)
-        :param prices: pd.Series of execution prices
+        Matrix-compatible vectorized execution logic for N-assets. 
+        Returns a DataFrame of total costs per asset per bar.
         """
         qty = share_diff.abs()
         trade_value = qty * prices
         
-        # Initialize output
-        costs = pd.DataFrame(index=share_diff.index)
-        costs['commission'] = 0.0
-        costs['regulatory'] = 0.0
+        # Initialize output matrix
+        total_costs = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
+        commission = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
+        regulatory = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
         
-        # Boolean masks for vectorized logic
+        # Boolean masks for vectorized matrix logic
         is_trade = qty > 0
         is_sell = share_diff < 0
         
         if asset_class == 'STK':
             # Commission: max(0.35, qty * 0.0035), capped at 1% of trade value
             base_comm = np.maximum(0.35, qty * 0.0035)
-            costs.loc[is_trade, 'commission'] = np.minimum(base_comm, trade_value * 0.01)
+            commission[is_trade] = np.minimum(base_comm, trade_value * 0.01)
             
             # Regulatory (Only on Sells)
             sec_fee = trade_value * self.SEC_FEE_RATE
             finra_fee = np.minimum(self.FINRA_TAF_MAX, qty * self.FINRA_TAF_RATE)
-            costs.loc[is_sell, 'regulatory'] = sec_fee + finra_fee
+            regulatory[is_sell] = sec_fee + finra_fee
             
         elif asset_class == 'FX':
-            # max($2.00, value * 0.20 bps)
-            costs.loc[is_trade, 'commission'] = np.maximum(2.00, trade_value * 0.00002)
+            commission[is_trade] = np.maximum(2.00, trade_value * 0.00002)
             
         elif asset_class == 'CRYPTO':
-            # max($1.75, value * 12 bps)
-            costs.loc[is_trade, 'commission'] = np.maximum(1.75, trade_value * 0.0012)
+            commission[is_trade] = np.maximum(1.75, trade_value * 0.0012)
             
         # Slippage is always applied to the gross value of the trade
-        costs['slippage'] = trade_value * self.slippage_bps
-        costs['total_cost'] = costs['commission'] + costs['regulatory'] + costs['slippage']
+        slippage = trade_value * self.slippage_bps
         
-        return costs
+        total_costs = commission + regulatory + slippage
+        
+        return total_costs
