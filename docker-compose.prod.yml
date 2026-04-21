@@ -1,0 +1,37 @@
+# docker-compose.prod.yml
+version: '3.8'
+
+services:
+  # ----------------------------------------------------
+  # 1. THE TRADING ENGINE (Headless Production Service)
+  # ----------------------------------------------------
+  live_engine:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: bluegrey_production
+    restart: unless-stopped  # CRITICAL: Auto-restarts if the app crashes
+    volumes:
+      # Code & Config Mappings (Two-way sync so you can edit locally)
+      - ./src:/app/src
+      - ./research:/app/research
+      - ./strategies:/app/strategies
+      - ./tools:/app/tools
+      - ./universes:/app/universes
+      
+      # Database & Persistence (Saves your DB to your local hard drive)
+      - ./data:/app/data
+    environment:
+      - ENV=PRODUCTION
+      - IB_HOST=host.docker.internal
+      - IB_PORT=7497         # IB Gateway / TWS Port
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+    # Overrides the Jupyter default command to run the headless entrypoint
+    command: ["python", "-m", "src.main"]
+    
+  # ----------------------------------------------------
+  # 2. METRICS & MONITORING (Optional but Recommended)
+  # ----------------------------------------------------
+  # In a live fund, you never 'print' to a console. 
+  # You stream telemetry to a dashboard.
+  # Future addition: Prometheus & Grafana services here.

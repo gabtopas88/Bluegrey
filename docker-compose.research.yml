@@ -1,0 +1,19 @@
+services:
+  research:
+    build: .
+    container_name: bluegrey_research
+    volumes:
+      # Code & Config Mappings (Two-way sync so you can edit locally)
+      - ./src:/app/src
+      - ./research:/app/research
+      - ./strategies:/app/strategies
+      - ./tools:/app/tools
+      - ./universes:/app/universes
+      
+      # Database & Persistence (Saves your DB to your local hard drive)
+      - ./data:/app/data
+    ports:
+      - "8888:8888"                 # Jupyter Port
+    environment:
+      - IB_HOST=host.docker.internal  # SPECIAL DNS to talk to Windows Host
+      - IB_PORT=7497
