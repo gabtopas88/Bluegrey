@@ -1,5 +1,5 @@
 import arcticdb as adb
-from src.config import ARCTIC_PATH
+from src.config.config import ARCTIC_PATH
 
 def audit():
     print(f"🔌 Connecting to Vault: {ARCTIC_PATH}")
