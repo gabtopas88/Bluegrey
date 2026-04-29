@@ -6,10 +6,10 @@ from ib_async import *
 from datetime import datetime
 
 # Local Imports
-import config
-from src.data import DataManager
-from src.execution import ExecutionHandler
-from src.risk import RiskManager
+from src.config import config
+from src.engine.data import DataManager
+from src.engine.execution import ExecutionHandler
+from src.engine.risk import RiskManager
 
 # --- STRATEGY LOADER ---
 # TODO: Import your specific strategy class here when ready.

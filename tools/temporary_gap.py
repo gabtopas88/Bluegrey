@@ -1,5 +1,5 @@
 from polygon import RESTClient
-import src.config as config
+from src.config import config
 from datetime import date
 
 client = RESTClient(config.POLYGON_API_KEY)

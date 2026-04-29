@@ -11,8 +11,8 @@ import seaborn as sns
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Anchor imports to your infrastructure
-from src.vector_backtester import VectorEngine
-from src.cpcv import PurgedKFold
+from src.backtest.vector_backtester import PortfolioVectorEngine
+from src.backtest.cpcv import PurgedKFold
 
 class CPCVOptimizer:
     def __init__(self, df: pd.DataFrame, target_col: str, strategy_class, param_grid: dict, asset_class: str, max_lookback_bars: int):
@@ -82,7 +82,7 @@ class CPCVOptimizer:
             target_weights = strategy.generate_signals(self.df)
             
             # 3. Execute Vector Engine to get exact Net Returns (Including Tiered IBKR Fees)
-            engine = VectorEngine(
+            engine = PortfolioVectorEngine(
                 prices=self.df[self.target_col], 
                 signals=target_weights, 
                 asset_class=self.asset_class,
