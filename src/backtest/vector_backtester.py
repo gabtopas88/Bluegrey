@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from src.config import ROOT_DIR  
-from src.fees import IBKRFeeModel
+from src.config.config import ROOT_DIR  
+from src.portfolio.fees import IBKRFeeModel
 
 # Suppress pandas fragmentation warnings for clean notebook output
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)

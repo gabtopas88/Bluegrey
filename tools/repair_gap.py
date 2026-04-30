@@ -11,7 +11,7 @@ from arcticdb import Arctic
 # --- PATH SETUP ---
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 sys.path.append(str(ROOT_DIR))
-import src.config as config
+from src.config import config
 
 # --- CONFIG ---
 TARGET_TICKER = "C:EURUSD"
