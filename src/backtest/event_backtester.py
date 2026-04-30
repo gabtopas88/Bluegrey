@@ -2,9 +2,9 @@ import os
 import logging
 from datetime import timedelta
 import pandas as pd
-from src.store import DataStore
-from src.risk import RiskManager
-from src.fees import IBKRFeeModel
+from src.data.store import DataStore
+from src.engine.risk import RiskManager
+from src.portfolio.fees import IBKRFeeModel
 
 # Minimal Logging for Backtest (Clean Output)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
