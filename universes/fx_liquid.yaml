@@ -1,0 +1,28 @@
+name: "Liquid FX Matrix"
+market: "fx"
+description: "Authorized combinations of the 14 Top-Tier Liquid Currencies."
+static_tickers:
+  # Majors
+  - "C:EURUSD"
+  - "C:USDJPY"
+  - "C:GBPUSD"
+  - "C:AUDUSD"
+  - "C:USDCAD"
+  - "C:USDCHF"
+  - "C:NZDUSD"
+  # USD / Regional Liquid
+  - "C:USDSGD"
+  - "C:USDHKD"
+  - "C:USDSEK"
+  - "C:USDNOK"
+  - "C:USDMXN"
+  - "C:USDZAR"
+  # Major Crosses
+  - "C:EURGBP"
+  - "C:EURJPY"
+  - "C:EURCHF"
+  - "C:EURAUD"
+  - "C:GBPJPY"
+  - "C:AUDJPY"
+  - "C:CADJPY"
+  - "C:CHFJPY"

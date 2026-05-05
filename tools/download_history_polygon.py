@@ -1,9 +1,11 @@
 """
 tools/download_history_polygon.py
-Institutional-Grade Data Ingestion Engine (Polygon.io -> ArcticDB)
+Institutional-Grade Multi-Asset Data Ingestion Engine (Polygon.io -> ArcticDB)
+Wired with UniverseManager for Point-In-Time Liquidity Filtering
 """
 import sys
 import os  # -- this isn't being used
+import argparse
 from pathlib import Path
 
 # --- IMPORT FIX ---
@@ -38,14 +40,19 @@ if str(ROOT_DIR) not in sys.path:
 import src.config as config
 """
 
+from datetime import date, timedelta
 import logging
 import pandas as pd
-from datetime import date
 from polygon import RESTClient
 from arcticdb import Arctic
 
-# Import the Unified Config
-import src.config as config
+# --- IMPORT FIX ---
+ROOT_DIR = Path(__file__).parent.parent.resolve()
+sys.path.append(str(ROOT_DIR))
+
+# Import the Unified Config & The Universe Manager
+from src.config import config
+from src.data.universe import UniverseManager
 
 # --- SETUP LOGGING ---
 logging.basicConfig(
@@ -62,154 +69,81 @@ class PolygonIngestor:
     def __init__(self, market="fx", freq="min", multiplier=1, initial_date="2020-01-01", final_date=str(date.today())):
         self.client = RESTClient(config.POLYGON_API_KEY)
         self.store = Arctic(config.ARCTIC_PATH)
-        self.freq = freq
-        self.multiplier = multiplier
-        self.initial_date = initial_date
-        self.final_date = final_date
-
-        FREQ_MAP = {
-            "sec": "second",
-            "min": "minute",
-            "hour": "hour",
-            "day": "day",
-            "week": "week",
-            "month": "month",
-            "quarter": "quarter",
-            "year": "year"
-        }
-        if freq not in FREQ_MAP:
-            raise ValueError(f"Unsupported freq: {freq}. Supported: {list(FREQ_MAP.keys())}")
+        self.universe_manager = UniverseManager()  # <--- INTEGRATION POINT
         
-        MARKET_MAP = {
-            "fx": "fx",
-            "crypto": "crypto",
-            "equity": "stocks",
-            "options": "otc",
-            "indices": "indices"
-        }
-        if market not in MARKET_MAP:
-            raise ValueError(f"Unsupported market: {market}. Supported: {list(MARKET_MAP.keys())}")
-
-        self.timespan = FREQ_MAP[freq]
-        self.market = MARKET_MAP[market]
-        
-        self.lib = self._get_library(config.LIBS[f"{market}_{freq}"])
-
-
-
-        
-    def _get_library(self, lib_name):
+    def _get_library(self, lib_name: str):
+        """Safely retrieves or creates an ArcticDB library."""
         if lib_name not in self.store.list_libraries():
             self.store.create_library(lib_name)
-            logger.info(f"Created ArcticDB library: {lib_name}")
+            logger.info(f"Created new ArcticDB library: {lib_name}")
         return self.store[lib_name]
 
-    def fetch_all_fx_tickers(self):
+    def _get_smart_start_date(self, library, ticker: str, default_start: str) -> str:
         """
-        Dynamically discovers ALL active forex pairs from Polygon.
-        (Use this if you want everything including exotics).
+        Queries ArcticDB to find the last known timestamp for a ticker.
+        Prevents downloading years of history we already have.
         """
-        logger.info("Querying Polygon for ALL active Currency Pairs...")
-        tickers = []
-        try:
-            # Iterate through all tickers where market is 'fx' and active is True
-            for t in self.client.list_tickers(market="fx", active=True, limit=1000):
-                tickers.append(t.ticker)
-            logger.info(f"Discovery Complete: Found {len(tickers)} active FX pairs.")
-            return tickers
-        except Exception as e:
-            logger.critical(f"Failed to fetch ticker list: {e}")
-            return []
-        
-    def fetch_all_tickers(self):
-        logger.info(f"Querying Polygon for all active {self.market} tickers...")
-        tickers = []
-        try:
-            # Iterate through all tickers where market is 'self.market' and active is True
-            for t in self.client.list_tickers(market=self.market, active=True, limit=1000):
-                tickers.append(t.ticker)
-            logger.info(f"Discovery Complete: Found {len(tickers)} active {self.market} tickers.")
-            return tickers
-        except Exception as e:
-            logger.critical(f"Failed to fetch ticker list: {e}")
-            return []
-
-    def fetch_liquid_fx_tickers(self):
-        """
-        Discovers FX pairs, but ONLY keeps those composed of Liquid Currencies.
-        Filters out exotic noise (e.g., AED, BHD, etc.)
-        """
-        # The 'Liquid Club' - Top traded currencies by volume
-        LIQUID_CURRENCIES = {
-            'USD', 'EUR', 'JPY', 'GBP', 'AUD', 'CAD', 'CHF', 'NZD', 
-            'SGD', 'HKD', 'SEK', 'NOK', 'MXN', 'ZAR'
-        }
-        
-        logger.info("Querying Polygon for FX pairs (Liquid Filter Active)...")
-        valid_tickers = []
-        
-        try:
-            # Fetch EVERYTHING first
-            all_tickers = self.client.list_tickers(market="fx", active=True, limit=1000)
+        if not library.has_symbol(ticker):
+            return default_start
             
-            for t in all_tickers:
-                # Format is usually 'C:EURUSD'
-                symbol = t.ticker
-                
-                # Safety check on length (must be C:XXXYYY -> 8 chars)
-                if len(symbol) != 8 or not symbol.startswith("C:"):
-                    continue
-                
-                base = symbol[2:5]
-                quote = symbol[5:8]
-                
-                # THE FILTER: Both sides must be liquid
-                if base in LIQUID_CURRENCIES and quote in LIQUID_CURRENCIES:
-                    valid_tickers.append(symbol)
-            
-            logger.info(f"Filter Complete: Reduced universe from 1000+ to {len(valid_tickers)} high-quality pairs.")
-            return valid_tickers
-
-        except Exception as e:
-            logger.critical(f"Failed to fetch ticker list: {e}")
-            return []
-
-    def download_ticker(self, ticker):
-        """
-        Downloads history. Handles missing Volume/VWAP gracefully.
-        Smart-Switch between WRITE (for new) and UPDATE (for existing).
-        """
-        
-        start_date=self.initial_date
-        end_date=self.final_date
-        
         try:
-            # 1. Fetch Data
+            df_existing = library.read(ticker).data
+            if df_existing.empty:
+                return default_start
+                
+            last_timestamp = df_existing.index.max()
+            
+            # Overlap by 1 day to ensure no gaps, deduplication handles the overlap
+            smart_start = (last_timestamp - timedelta(days=1)).strftime("%Y-%m-%d")
+            return smart_start
+            
+        except Exception as e:
+            logger.warning(f"Failed to resolve smart start date for {ticker}, defaulting to {default_start}. Error: {e}")
+            return default_start
+
+    def download_ticker(self, ticker: str, lib_name: str, timespan: str = "minute", 
+                        multiplier: int = 1, start_date: str = "2020-01-01", end_date: str = None):
+        """
+        Core ingestion logic. Fetches, formats, and smartly updates ArcticDB.
+        """
+        if end_date is None:
+            end_date = str(date.today())
+
+        lib = self._get_library(lib_name)
+        
+        # SMART UPDATE
+        actual_start_date = self._get_smart_start_date(lib, ticker, start_date)
+        is_update = actual_start_date != start_date
+        action_type = "UPDATE" if is_update else "FULL PULL"
+        
+        if is_update and actual_start_date >= end_date:
+             print(f"⏩ {ticker} is already up to date ({end_date}). Skipping.")
+             return
+
+        try:
             aggs = []
             for a in self.client.list_aggs(
                 ticker=ticker,
-                multiplier=self.multiplier,
-                timespan=self.timespan,
-                from_=start_date,
+                multiplier=multiplier,
+                timespan=timespan,
+                from_=actual_start_date,
                 to=end_date,
                 limit=50000
             ):
                 aggs.append(a)
 
             if not aggs:
-                # logger.warning(f"    No data found for {ticker}")
+                print(f"⚠️ No new data found for {ticker} between {actual_start_date} and {end_date}.")
                 return
 
             df = pd.DataFrame(aggs)
             
-            # 2. Format Data
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
             
-            cols_map = {'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume', 'vw': 'vwap'}
+            cols_map = {'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume', 'vw': 'vwap', 'n': 'transactions'}
             df.rename(columns=cols_map, inplace=True)
             
-            # Fill missing columns with 0.0 to prevent crashes on exotic pairs
             expected_cols = ['open', 'high', 'low', 'close', 'volume', 'vwap']
             for col in expected_cols:
                 if col not in df.columns:
@@ -218,69 +152,87 @@ class PolygonIngestor:
             df = df[expected_cols]
             df = df[~df.index.duplicated(keep='last')]
 
-            # 3. Write to Vault
-            if self.lib.has_symbol(ticker):
-                self.lib.update(ticker, df)
-                action = "Updated"
+            if lib.has_symbol(ticker):
+                lib.update(ticker, df)
+                action = f"Appended {len(df)} rows"
             else:
-                self.lib.write(ticker, df)
-                action = "Created"
+                lib.write(ticker, df)
+                action = f"Created {len(df)} rows"
             
-            print(f"✅ {action} {ticker}: {len(df)} bars.")
+            print(f"✅ [{action_type}] {ticker}: {action} (From: {actual_start_date}).")
 
         except Exception as e:
-            # Catch-all to keep the loop running even if one pair fails
             print(f"❌ FAILED {ticker}: {e}")
 
-    def run_bulk_fx(self):
+    def run_batch_job(self, universe_name: str, timespan: str, multiplier: int, start_date: str, end_date: str, lib_name: str, specific_tickers: list = None):
         """
-        Main execution flow for Bulk FX Download.
+        Orchestrator for processing lists of assets.
+        Now queries the UniverseManager for Point-In-Time validated tickers.
         """
-        # --- SELECT UNIVERSE MODE HERE ---
-        all_tickers = self.fetch_liquid_fx_tickers()   # OPTION A: Institutional Filter (Current)
-        # all_tickers = self.fetch_all_fx_tickers()    # OPTION B: Download Everything (Uncomment to use)
+        logger.info(f"--- STARTING BATCH JOB: Universe '{universe_name}' | {multiplier}-{timespan} ---")
         
-        if not all_tickers:
-            logger.error("No tickers to process. Exiting.")
-            return
-
-        logger.info(f"Starting Batch Job for {len(all_tickers)} pairs.")
-        
-        for i, ticker in enumerate(all_tickers):
-            print(f"[{i+1}/{len(all_tickers)}] ", end="")
-            self.download_ticker(ticker)
-
-    def run_bulk(self):
-        """
-        Main execution flow for Bulk market data Download.
-        """
-        if self.market == "fx":
-            all_tickers = self.fetch_liquid_fx_tickers()   # OPTION A: Institutional Filter (Current)
-            # all_tickers = self.fetch_all_fx_tickers()    # OPTION B: Download Everything (Uncomment to use)
-        # elif self.market == "crypto":
+        # 1. DELEGATE TICKER SELECTION TO THE UNIVERSE MANAGER
+        if specific_tickers:
+            logger.info("Override active: Using manually provided specific_tickers.")
+            tickers = specific_tickers
         else:
-            all_tickers = self.fetch_all_tickers()
-        # else:
-        #     raise ValueError(f"Unsupported market: {self.market}")
-
-        if not all_tickers:
+            # Pass the end_date to the UniverseManager so it fetches tickers that were 
+            # active and liquid specifically on that date (Point-In-Time)
+            tickers = self.universe_manager.get_universe(universe_name, as_of_date=end_date)
+            
+        if not tickers:
             logger.error("No tickers to process. Exiting.")
             return
 
-        logger.info(f"Starting Batch Job for {len(all_tickers)} {self.market} tickers.")
+        logger.info(f"Data Factory received {len(tickers)} validated assets. Commencing download...")
 
-        for i, ticker in enumerate(all_tickers):
-            print(f"[{i+1}/{len(all_tickers)}] ", end="")
-            self.download_ticker(ticker)
+        # 2. EXECUTE THE DOWNLOAD LOOP
+        for i, ticker in enumerate(tickers):
+            print(f"[{i+1}/{len(tickers)}] ", end="")
+            self.download_ticker(
+                ticker=ticker,
+                lib_name=lib_name,
+                timespan=timespan,
+                multiplier=multiplier,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Bluegrey Institutional Data Factory")
+    
+    # We replaced --market with --universe because the YAML config defines the market
+    parser.add_argument("--universe", type=str, required=True, 
+                        help="Name of the Universe YAML file (e.g., 'equities_liquid', 'fx_g10').")
+    parser.add_argument("--lib-name", type=str, required=True, 
+                        help="Target ArcticDB Library name (e.g., equities_daily, crypto_min).")
+    parser.add_argument("--timespan", type=str, default="minute", choices=['minute', 'hour', 'day', 'week', 'month'], 
+                        help="Bar size unit.")
+    parser.add_argument("--multiplier", type=int, default=1, 
+                        help="Bar size multiplier (e.g., 5 for 5-minute bars).")
+    parser.add_argument("--start-date", type=str, default="2020-01-01", 
+                        help="Fallback start date (YYYY-MM-DD) if data does not exist in DB.")
+    parser.add_argument("--end-date", type=str, default=str(date.today()), 
+                        help="End date (YYYY-MM-DD). Defaults to today.")
+    parser.add_argument("--tickers", type=str, nargs="+", default=None, 
+                        help="Manual override: Specific tickers to download (Space separated).")
+    
+    return parser.parse_args()
 
 if __name__ == "__main__":
+    args = parse_args()
     
-    # ingestor = PolygonIngestor()  # -- default is FX with liquid filter
-    ingestor = PolygonIngestor(market="indices", freq="day", initial_date="2026-04-01", final_date=str(date.today()))  # -- example for crypto
-    
-    logger.info(f"\nIgnition: Bluegrey Data Factory. Target: {config.ARCTIC_PATH}")
-    
-    # ingestor.run_bulk_fx()  # -- use this for FX with the liquid filter
-    ingestor.run_bulk()
-    
-    logger.info("Job Complete.")
+    ingestor = PolygonIngestor()
+    logger.info(f"Ignition: Bluegrey Data Factory. Target: {config.ARCTIC_PATH}")
+
+    ingestor.run_batch_job(
+        universe_name=args.universe,
+        timespan=args.timespan,
+        multiplier=args.multiplier,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        lib_name=args.lib_name,
+        specific_tickers=args.tickers
+    )
+
+    logger.info("Batch Job Complete.")
