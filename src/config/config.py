@@ -17,11 +17,58 @@ ACCOUNT_ID = ""
 
 # --- DATABASE (ArcticDB) ---
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"
-LIBS = {
-    "equity_min": "equity/min",
-    "fx_min": "fx/min",
-    "futures_min": "futures/min",
+LIBS = {   # This is the mapping of market/frequency to ArcticDB library names. The download script uses this to know where to save data, and the backtester uses it to know where to load data.
+    # --- FX ---
+    "fx_sec": "fx.sec",
+    "fx_min": "fx.minute",
+    "fx_hour": "fx.hour",
+    "fx_day": "fx.day",
+    "fx_week": "fx.week",
+    "fx_month": "fx.month",
+    "fx_quarter": "fx.quarter",
+    "fx_year": "fx.year",
+
+    # --- CRYPTO ---
+    "crypto_sec": "crypto.sec",
+    "crypto_min": "crypto.minute",
+    "crypto_hour": "crypto.hour",
+    "crypto_day": "crypto.day",
+    "crypto_week": "crypto.week",
+    "crypto_month": "crypto.month",
+    "crypto_quarter": "crypto.quarter",
+    "crypto_year": "crypto.year",
+
+    # --- EQUITY (stocks) ---
+    "equity_sec": "equity.sec",
+    "equity_min": "equity.minute",
+    "equity_hour": "equity.hour",
+    "equity_day": "equity.day",
+    "equity_week": "equity.week",
+    "equity_month": "equity.month",
+    "equity_quarter": "equity.quarter",
+    "equity_year": "equity.year",
+
+    # --- OPTIONS ---
+    "options_sec": "options.sec",
+    "options_min": "options.minute",
+    "options_hour": "options.hour",
+    "options_day": "options.day",
+    "options_week": "options.week",
+    "options_month": "options.month",
+    "options_quarter": "options.quarter",
+    "options_year": "options.year",
+
+    # --- INDICES ---
+    "indices_sec": "indices.sec",
+    "indices_min": "indices.minute",
+    "indices_hour": "indices.hour",
+    "indices_day": "indices.day",
+    "indices_week": "indices.week",
+    "indices_month": "indices.month",
+    "indices_quarter": "indices.quarter",
+    "indices_year": "indices.year",
 }
+
 
 # --- DATA VENDORS ---
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
