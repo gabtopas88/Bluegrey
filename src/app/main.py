@@ -10,6 +10,7 @@ from src.config import config
 from src.engine.data import DataManager
 from src.engine.execution import ExecutionHandler
 from src.engine.risk import RiskManager
+from src.infra.state_store import write_json
 
 # --- STRATEGY LOADER ---
 # TODO: Import your specific strategy class here when ready.
@@ -64,6 +65,7 @@ class TradingEngine:
         self.ib.pendingTickersEvent += self.on_tick_event
         
         logger.info("🟢 ENGINE RUNNING. Listening for Market Data...")
+        write_json("heartbeat.json", {"status": "running", "event": "engine_start"})
         self.ib.run()
 
     def on_tick_event(self, tickers):
@@ -72,6 +74,7 @@ class TradingEngine:
         Triggered by IBKR roughly every 250ms if there are updates.
         """
         # 1. INGEST & CHECK HEALTH
+        write_json("heartbeat.json", {"status": "running", "event": "tick", "tickers": len(tickers)})
         event = self.data_manager.on_tick(tickers)
         
         # --- RISK HEARTBEAT ---
