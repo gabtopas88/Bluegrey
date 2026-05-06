@@ -1,6 +1,7 @@
 from ib_async import *
 from datetime import datetime
 import logging
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,12 @@ class ExecutionHandler:
             # Safety: Qualify Contract
             self.ib.qualifyContracts(contract) 
             
+            if not config.ENABLE_ORDER_SUBMISSION:
+                logger.info(
+                    f"🧪 DRY-RUN ORDER: {action} {qty} {contract.localSymbol} ({order_type}) -- submission disabled"
+                )
+                continue
+
             # FIRE
             trade = self.ib.placeOrder(contract, ib_order)
             
