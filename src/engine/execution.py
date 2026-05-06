@@ -2,6 +2,7 @@ from ib_async import *
 from datetime import datetime
 import logging
 from src.config import config
+from src.infra.state_store import append_jsonl
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,15 @@ class ExecutionHandler:
 
             # Safety: Qualify Contract
             self.ib.qualifyContracts(contract) 
+
+            intended_order = {
+                'symbol': contract.localSymbol,
+                'action': action,
+                'qty': qty,
+                'type': order_type,
+                'mode': 'dry-run' if not config.ENABLE_ORDER_SUBMISSION else 'live',
+            }
+            append_jsonl("orders.jsonl", intended_order)
             
             if not config.ENABLE_ORDER_SUBMISSION:
                 logger.info(
@@ -72,6 +82,14 @@ class ExecutionHandler:
                 'status': 'SUBMITTED',
                 'timestamp': datetime.now()
             }
+            append_jsonl("orders.jsonl", {
+                'symbol': contract.localSymbol,
+                'action': action,
+                'qty': qty,
+                'type': order_type,
+                'status': 'SUBMITTED',
+                'order_id': trade.order.orderId,
+            })
             
             logger.info(f"🔫 ORDER SENT: {action} {qty} {contract.localSymbol} (ID: {trade.order.orderId})")
 
@@ -99,6 +117,14 @@ class ExecutionHandler:
         shares = fill.execution.shares
         price = fill.execution.price
         comm = fill.commissionReport.commission if fill.commissionReport else 0.0
+        append_jsonl("fills.jsonl", {
+            'symbol': symbol,
+            'side': side,
+            'shares': shares,
+            'price': price,
+            'commission': comm,
+            'order_id': trade.order.orderId,
+        })
         
         logger.info(f"💸 EXECUTION CONFIRMED: {side} {shares} {symbol} @ ${price:.2f} (Comm: {comm})")
         
