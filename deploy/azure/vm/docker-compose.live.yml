@@ -1,0 +1,41 @@
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib-gateway
+    restart: unless-stopped
+    environment:
+      - TWS_USERID=${TWS_USERID:-}
+      - TWS_PASSWORD=${TWS_PASSWORD:-}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - VNC_SERVER_PASSWORD=${VNC_SERVER_PASSWORD:-}
+    volumes:
+      - ib_gateway_state:/home/ibgateway/Jts
+      - ib_gateway_logs:/home/ibgateway/logs
+    networks:
+      - bluegrey_live_internal
+
+  bluegrey-live:
+    build:
+      context: ../../..
+      dockerfile: docker/live.Dockerfile
+    container_name: bluegrey-live
+    restart: unless-stopped
+    environment:
+      - IB_HOST=ib-gateway
+    depends_on:
+      - ib-gateway
+    volumes:
+      - bluegrey_live_state:/app/data
+      - bluegrey_live_logs:/app/logs
+    networks:
+      - bluegrey_live_internal
+
+networks:
+  bluegrey_live_internal:
+    internal: true
+
+volumes:
+  ib_gateway_state:
+  ib_gateway_logs:
+  bluegrey_live_state:
+  bluegrey_live_logs:
