@@ -11,9 +11,13 @@ DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 # --- CONNECTIVITY ---
-IB_PORT = 7497
-IB_CLIENT_ID = 202
-ACCOUNT_ID = "" 
+IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
+IB_PORT = int(os.getenv("IB_PORT", 7497))
+IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", 202))
+ACCOUNT_ID = os.getenv("IB_ACCOUNT", "")
+IB_MARKET_DATA_TYPE = int(os.getenv("IB_MARKET_DATA_TYPE", 3))
+ENABLE_ORDER_SUBMISSION = os.getenv("ENABLE_ORDER_SUBMISSION", "false").strip().lower() in {"1", "true", "yes", "on"}
+STATE_DIR = Path(os.getenv("STATE_DIR", "./state"))
 
 # --- DATABASE (ArcticDB) ---
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"

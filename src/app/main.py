@@ -45,8 +45,8 @@ class TradingEngine:
         """
         try:
             logger.info("🔌 Connecting to IBKR...")
-            self.ib.connect('127.0.0.1', config.IB_PORT, clientId=config.IB_CLIENT_ID)
-            self.ib.reqMarketDataType(3) # Delayed Data (switch to 1 for Live)
+            self.ib.connect(config.IB_HOST, config.IB_PORT, clientId=config.IB_CLIENT_ID)
+            self.ib.reqMarketDataType(config.IB_MARKET_DATA_TYPE) # Delayed Data (switch to 1 for Live)
             logger.info("✅ Connected.")
         except Exception as e:
             logger.error(f"❌ Connection Failed: {e}")
