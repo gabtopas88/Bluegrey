@@ -20,7 +20,7 @@ ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"
 LIBS = {   # This is the mapping of market/frequency to ArcticDB library names. The download script uses this to know where to save data, and the backtester uses it to know where to load data.
     # --- FX ---
     "fx_sec": "fx.sec",
-    "fx_min": "fx.minute",
+    "fx_min": "fx.min",
     "fx_hour": "fx.hour",
     "fx_day": "fx.day",
     "fx_week": "fx.week",
@@ -30,7 +30,7 @@ LIBS = {   # This is the mapping of market/frequency to ArcticDB library names. 
 
     # --- CRYPTO ---
     "crypto_sec": "crypto.sec",
-    "crypto_min": "crypto.minute",
+    "crypto_min": "crypto.min",
     "crypto_hour": "crypto.hour",
     "crypto_day": "crypto.day",
     "crypto_week": "crypto.week",
@@ -40,7 +40,7 @@ LIBS = {   # This is the mapping of market/frequency to ArcticDB library names. 
 
     # --- EQUITY (stocks) ---
     "equity_sec": "equity.sec",
-    "equity_min": "equity.minute",
+    "equity_min": "equity.min",
     "equity_hour": "equity.hour",
     "equity_day": "equity.day",
     "equity_week": "equity.week",
@@ -50,7 +50,7 @@ LIBS = {   # This is the mapping of market/frequency to ArcticDB library names. 
 
     # --- OPTIONS ---
     "options_sec": "options.sec",
-    "options_min": "options.minute",
+    "options_min": "options.min",
     "options_hour": "options.hour",
     "options_day": "options.day",
     "options_week": "options.week",
@@ -60,7 +60,7 @@ LIBS = {   # This is the mapping of market/frequency to ArcticDB library names. 
 
     # --- INDICES ---
     "indices_sec": "indices.sec",
-    "indices_min": "indices.minute",
+    "indices_min": "indices.min",
     "indices_hour": "indices.hour",
     "indices_day": "indices.day",
     "indices_week": "indices.week",

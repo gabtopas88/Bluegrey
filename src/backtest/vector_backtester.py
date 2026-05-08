@@ -46,7 +46,8 @@ class PortfolioVectorEngine:
         # 3. Calculate Frictionless (Gross) Returns & Equity
         # This shows what the Alpha is worth before market structure degrades it.
         # (Weight at T-1) * (Return at T) summed across all assets per bar
-        portfolio_gross_returns = (actual_weights.shift(1) * market_returns).sum(axis=1)
+        temp_gross = actual_weights.shift(1) * market_returns
+        portfolio_gross_returns = temp_gross.sum(axis=1) if hasattr(temp_gross, 'shape') and len(temp_gross.shape) > 1 else temp_gross
         gross_equity = self.initial_capital * (1 + portfolio_gross_returns).cumprod()
         
         # 4. Calculate Share Turnover dynamically based on Gross AUM
@@ -63,7 +64,7 @@ class PortfolioVectorEngine:
         cost_matrix = self.fee_model.calculate_vector_matrix(self.asset_class, share_diff, self.prices)
         
         # Sum costs across the entire portfolio per bar
-        total_costs_usd = cost_matrix.sum(axis=1)
+        total_costs_usd = cost_matrix.sum(axis=1) if hasattr(cost_matrix, 'shape') and len(cost_matrix.shape) > 1 else cost_matrix
         cumulative_costs = total_costs_usd.cumsum()
         
         # 6. Calculate Net Portfolio Equity Curve & Returns
@@ -74,7 +75,7 @@ class PortfolioVectorEngine:
         net_returns = net_equity.pct_change(fill_method=None).fillna(0)
         
         # Equal-Weight Benchmark for comparison
-        ew_benchmark_returns = market_returns.mean(axis=1)
+        ew_benchmark_returns = market_returns.mean(axis=1) if hasattr(market_returns, 'shape') and len(market_returns.shape) > 1 else market_returns
         cum_benchmark = (1 + ew_benchmark_returns).cumprod()
         
         self.portfolio_stats = pd.DataFrame({

@@ -89,9 +89,14 @@ class IBKRFeeModel:
         trade_value = qty * prices
         
         # Initialize output matrix
-        total_costs = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
-        commission = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
-        regulatory = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
+        if isinstance(share_diff, pd.Series):
+            total_costs = pd.Series(0.0, index=share_diff.index)
+            commission = pd.Series(0.0, index=share_diff.index)
+            regulatory = pd.Series(0.0, index=share_diff.index)
+        else:
+            total_costs = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
+            commission = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
+            regulatory = pd.DataFrame(0.0, index=share_diff.index, columns=share_diff.columns)
         
         # Boolean masks for vectorized matrix logic
         is_trade = qty > 0
