@@ -22,17 +22,23 @@ services:
     restart: unless-stopped
     environment:
       - IB_HOST=ib-gateway
+      - IB_PORT=${IB_PORT:-4004}
+      - IB_CLIENT_ID=${IB_CLIENT_ID:-202}
+      - IB_ACCOUNT=${IB_ACCOUNT:-}
+      - IB_MARKET_DATA_TYPE=${IB_MARKET_DATA_TYPE:-3}
+      - ENABLE_ORDER_SUBMISSION=${ENABLE_ORDER_SUBMISSION:-false}
+      - STATE_DIR=/app/state
+      - BLUEGREY_UNIVERSE=${BLUEGREY_UNIVERSE:-SPY:STK}
     depends_on:
       - ib-gateway
     volumes:
-      - bluegrey_live_state:/app/data
+      - bluegrey_live_state:/app/state
       - bluegrey_live_logs:/app/logs
     networks:
       - bluegrey_live_internal
 
 networks:
   bluegrey_live_internal:
-    internal: true
 
 volumes:
   ib_gateway_state:
