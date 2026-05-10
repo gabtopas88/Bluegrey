@@ -50,3 +50,30 @@ def build_contract(symbol: str, asset_class: str) -> Contract:
         return Crypto(clean_symbol, 'PAXOS', 'USD')
     else:
         raise ValueError(f"Unknown asset class: {asset_class}")
+BLUEGREY_UNIVERSE = os.getenv("BLUEGREY_UNIVERSE", "SPY:STK")
+
+
+def parse_universe(raw: str) -> dict:
+    """Parse universe strings like 'SPY:STK,QQQ:STK,EURUSD:FX' into IB contracts."""
+    instruments = {}
+    entries = [entry.strip() for entry in raw.split(',') if entry.strip()]
+
+    for entry in entries:
+        parts = entry.split(':')
+        if len(parts) != 2:
+            raise ValueError(
+                f"Malformed BLUEGREY_UNIVERSE entry '{entry}'. Expected SYMBOL:ASSET_CLASS."
+            )
+
+        symbol, asset_class = parts[0].strip(), parts[1].strip().upper()
+        if not symbol or not asset_class:
+            raise ValueError(
+                f"Malformed BLUEGREY_UNIVERSE entry '{entry}'. Expected SYMBOL:ASSET_CLASS."
+            )
+
+        instruments[symbol] = build_contract(symbol, asset_class)
+
+    return instruments
+
+
+INSTRUMENTS = parse_universe(BLUEGREY_UNIVERSE)
