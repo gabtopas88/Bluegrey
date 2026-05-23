@@ -16,9 +16,10 @@ class StrategySignal:
     orders: List[Dict[str, Any]] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
 
-    def add_order(self, contract, action: str, qty: int, order_type: str = 'MKT', estimated_price: float = 1.0, volatility: float = None):
+    def add_order(self, contract: Any, action: str, qty: int, order_type: str = 'MKT', estimated_price: float = 1.0, volatility: float = None):
         """
         Helper method to guarantee all orders have the exact keys required by the Risk Manager.
+        'contract' is kept as Any to keep this layer agnostic to IBKR's specific object classes.
         """
         symbol = contract.localSymbol if hasattr(contract, 'localSymbol') else str(contract)
         
@@ -42,15 +43,30 @@ class BaseStrategy:
         self.params = params if params is not None else {}
 
     # ==========================================
+    # ⚙️ LIFECYCLE INTERFACE (Engine Communication)
+    # ==========================================
+    def get_warmup_lookback(self) -> int:
+        """
+        Returns the number of historical bars required to prime the strategy before live trading.
+        """
+        return 0 # Default: No warmup required
+
+    def prime_state(self, historical_data: Dict[str, pd.DataFrame]):
+        """
+        Receives historical data structured as a dictionary of matrices (e.g. {'close': df}).
+        Override this in stateful strategies to fast-forward internal memory.
+        """
+        pass # Default: Do nothing
+
+    # ==========================================
     # 🔬 RESEARCH INTERFACE (For the Optimizer)
     # ==========================================
-    def generate_signals(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame]]) -> pd.DataFrame:
+    def generate_signals(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         Calculates target weights across the entire historical dataset.
         MUST be implemented for CPCV and Portfolio Vector Backtesting.
-        
-        :param data: Can be a MultiIndex DataFrame (Date x Symbol -> Features) 
-                     or a Dictionary of 2D feature matrices (e.g., data['close'], data['volume']).
+
+        :param data: A Dictionary of 2D feature matrices (e.g., data['close'] is Time x Tickers).
         :return: pandas DataFrame of target weights (-1.0 to 1.0). 
                  Index = Datetime, Columns = Tickers.
         """
@@ -63,11 +79,10 @@ class BaseStrategy:
         """Called by the Engine on raw price updates."""
         return StrategySignal(signal_type="NONE")
 
-    def on_bar(self, latest_bars: dict) -> StrategySignal:
+    def on_bar(self, latest_bars: pd.DataFrame) -> StrategySignal:
         """
         Called by the Engine when a new bar closes.
-        In a multi-asset setup, 'latest_bars' should be a dictionary mapping 
-        symbols to their most recently closed OHLCV data.
+        latest_bars is a cross-sectional DataFrame representing the current timeframe's closed bar (Index: Tickers, Columns: OHLCV).
         """
         return StrategySignal(signal_type="NONE")
 

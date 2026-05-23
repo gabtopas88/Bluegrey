@@ -27,7 +27,7 @@ LIBS = {
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
 
 # --- STRATEGY SETTINGS ---
-STRATEGY_CLASS = "KalmanPairStrategy" 
+STRATEGY_CLASS = "KalmanPairsStrategy" 
 STRATEGY_PARAMS = {} 
 
 # ==========================================
