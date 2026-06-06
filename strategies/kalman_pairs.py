@@ -210,6 +210,29 @@ class KalmanPairsStrategy(BaseStrategy):
         # positions; only re-sync via PortfolioManager should mutate held quantities.
 
     # ==========================================
+    # 📋 TELEMETRY HELPERS
+    # ==========================================
+    def _build_meta(self, z: float = None) -> dict:
+        """
+        Returns the full strategy diagnostic state as a JSON-serialisable dict.
+
+        Called from on_bar() on every return path so the telemetry layer can
+        persist uniform decision rows for every bar — including warmup, invalid-
+        price, and low-volatility bars where z is not yet computable. This makes
+        the live decisions stream directly comparable with the backtester's
+        equivalent stream during parity-checks.
+        """
+        return {
+            'z':              float(z) if z is not None and not pd.isna(z) else None,
+            'beta':           float(self.state['beta']) if self.state['beta'] is not None else None,
+            'P':              float(self.state['P']),
+            'current_pos':    int(self.state['current_pos']),
+            'errors_buffer':  len(self.state['errors']),
+            'leg_y':          self.leg_y,
+            'leg_x':          self.leg_x,
+        }
+
+    # ==========================================
     # 🔬 RESEARCH & BACKTESTING (Matrix Dictionary Input)
     # ==========================================
     def generate_signals(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -288,21 +311,27 @@ class KalmanPairsStrategy(BaseStrategy):
     # 🏭 LIVE EXECUTION / EVENT-DRIVEN (Cross-Sectional DF Input)
     # ==========================================
     def on_bar(self, latest_bars: pd.DataFrame) -> StrategySignal:
-        """Executes the recursive 1D Kalman Filter on a single new cross-sectional bar."""
+        """
+        Executes the recursive 1D Kalman Filter on a single new cross-sectional bar.
+
+        Every return path attaches the strategy's full diagnostic state via
+        _build_meta(), so the telemetry layer can persist a uniform decision row
+        on every bar — including warmup/invalid bars where z is not computable.
+        """
         if self.leg_y not in latest_bars.index or self.leg_x not in latest_bars.index:
-            return StrategySignal(signal_type="AWAITING_DATA")
+            return StrategySignal(signal_type="AWAITING_DATA", meta=self._build_meta())
 
         y_t = latest_bars.loc[self.leg_y, 'close']
         x_t = latest_bars.loc[self.leg_x, 'close']
 
         if pd.isna(y_t) or pd.isna(x_t) or y_t <= 0 or x_t <= 0:
-            return StrategySignal(signal_type="INVALID_PRICE")
+            return StrategySignal(signal_type="INVALID_PRICE", meta=self._build_meta())
 
         # 1. Warm-Up Initialization (If not primed via Engine)
         if self.state['beta'] is None:
             self.state['beta'] = y_t / x_t
             logger.info(f"Cold-Start Initialized Kalman Beta: {self.state['beta']:.4f}")
-            return StrategySignal(signal_type="WARMUP_BETA")
+            return StrategySignal(signal_type="WARMUP_BETA", meta=self._build_meta())
 
         # 2. Kalman Filter Recursion
         beta_hat = self.state['beta']
@@ -320,13 +349,13 @@ class KalmanPairsStrategy(BaseStrategy):
         self.state['errors'].append(e_t)
 
         if len(self.state['errors']) < self.z_lookback:
-            return StrategySignal(signal_type="WARMUP_ZSCORE")
+            return StrategySignal(signal_type="WARMUP_ZSCORE", meta=self._build_meta())
 
         errors_array = np.array(self.state['errors'])
         std_e = np.std(errors_array)
 
         if std_e < 1e-8:
-            return StrategySignal(signal_type="LOW_VOLATILITY")
+            return StrategySignal(signal_type="LOW_VOLATILITY", meta=self._build_meta())
 
         mean_e = np.mean(errors_array)
         z = (e_t - mean_e) / std_e
@@ -334,7 +363,7 @@ class KalmanPairsStrategy(BaseStrategy):
         # 4. State Machine Logic
         current_pos = self.state['current_pos']
         new_pos = current_pos
-        signal = StrategySignal(signal_type="FLAT", meta={'z': z, 'beta': self.state['beta']})
+        signal = StrategySignal(signal_type="FLAT", meta=self._build_meta(z=z))
 
         if current_pos == 0:
             if z < -self.entry_z:
@@ -350,6 +379,8 @@ class KalmanPairsStrategy(BaseStrategy):
         if new_pos != current_pos:
             signal = self._generate_orders(new_pos, current_pos, signal, y_t, x_t)
             self.state['current_pos'] = new_pos
+            # Refresh meta AFTER the state mutation so current_pos reflects the new state
+            signal.meta = self._build_meta(z=z)
 
         return signal
 

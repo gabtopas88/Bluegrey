@@ -23,6 +23,11 @@ LIBS = {
     "futures_min": "futures/min",
 }
 
+# --- TELEMETRY (Parquet event log) ---
+# Lives under data/ so it's auto-gitignored. Three streams (decisions, orders,
+# fills) plus session manifests, partitioned by UTC date.
+TELEMETRY_PATH = DATA_DIR / "telemetry"
+
 # --- DATA VENDORS ---
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
 
