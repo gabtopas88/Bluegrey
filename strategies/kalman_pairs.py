@@ -2,11 +2,15 @@ import numpy as np
 import pandas as pd
 from collections import deque
 import logging
-from typing import Dict
+from typing import Dict, TYPE_CHECKING
 
 from strategies.base import BaseStrategy, StrategySignal
 
+if TYPE_CHECKING:
+    from src.portfolio import LivePosition
+
 logger = logging.getLogger(__name__)
+
 
 class KalmanPairsStrategy(BaseStrategy):
     """
@@ -15,28 +19,34 @@ class KalmanPairsStrategy(BaseStrategy):
     """
     def __init__(self, instruments: dict, params: dict):
         super().__init__(instruments, params)
-        
+
         # Strategy Parameters
-        self.leg_y = params.get('leg_y', 'C:AUDUSD') # The Dependent Variable
-        self.leg_x = params.get('leg_x', 'C:NZDUSD') # The Independent Variable
-        
+        self.leg_y = params.get('leg_y', 'C:AUDUSD')  # The Dependent Variable
+        self.leg_x = params.get('leg_x', 'C:NZDUSD')  # The Independent Variable
+
         self.entry_z = params.get('entry_z', 2.0)
         self.exit_z = params.get('exit_z', 0.0)
-        self.z_lookback = params.get('z_lookback', 120) # 2 hours of 1-min bars
-        
+        self.z_lookback = params.get('z_lookback', 120)  # 2 hours of 1-min bars
+
         # Kalman Filter State Variances
-        self.delta = params.get('delta', 1e-5) # How fast beta can adapt
-        self.vt = params.get('vt', 1e-3)       # Observation noise variance
-        
+        self.delta = params.get('delta', 1e-5)  # How fast beta can adapt
+        self.vt = params.get('vt', 1e-3)        # Observation noise variance
+
         # Production Execution Parameters
-        self.base_qty = params.get('base_qty', 1000) # Base unit for the Y leg
+        self.base_qty = params.get('base_qty', 1000)  # Base unit for the Y leg
+
+        # Drift threshold for hedge-ratio warning (in %). If the live held ratio
+        # differs from the current model β by more than this on boot, log loudly.
+        self.hedge_drift_threshold_pct = params.get('hedge_drift_threshold_pct', 20.0)
 
         # Event-Driven State Memory
         self.state = {
             'beta': None,
             'P': 1.0,
-            'errors': deque(maxlen=self.z_lookback), # O(1) rolling window
-            'current_pos': 0                         # 0: Flat, 1: Long Spread, -1: Short Spread
+            'errors': deque(maxlen=self.z_lookback),  # O(1) rolling window
+            'current_pos': 0,                          # 0: Flat, 1: Long Spread, -1: Short Spread
+            'held_qty_y': 0.0,                         # Signed broker-confirmed quantity for leg Y
+            'held_qty_x': 0.0                          # Signed broker-confirmed quantity for leg X
         }
 
     # ==========================================
@@ -48,10 +58,10 @@ class KalmanPairsStrategy(BaseStrategy):
 
     def prime_state(self, historical_data: Dict[str, pd.DataFrame]):
         """
-        Fast-forwards internal Kalman state variables using a dictionary of matrices."""
-        
+        Fast-forwards internal Kalman state variables using a dictionary of matrices.
+        """
         close_matrix = historical_data.get('close')
-        
+
         if close_matrix is None or close_matrix.empty:
             logger.warning("Priming failed: 'close' matrix missing. Strategy will cold-start.")
             return
@@ -61,7 +71,7 @@ class KalmanPairsStrategy(BaseStrategy):
             return
 
         logger.info(f"Priming state with {len(close_matrix)} historical bars...")
-        
+
         y = close_matrix[self.leg_y].values
         x = close_matrix[self.leg_x].values
         n = len(y)
@@ -87,12 +97,108 @@ class KalmanPairsStrategy(BaseStrategy):
         # Overwrite Live State Memory
         self.state['beta'] = beta[-1]
         self.state['P'] = P[-1]
-        
+
         # Populate the ring buffer
         lookback_slice = min(self.z_lookback, n)
         self.state['errors'].extend(e[-lookback_slice:])
-        
+
         logger.info(f"🧠 Warm-Up Complete | Beta: {self.state['beta']:.4f} | P: {self.state['P']:.6f}")
+
+    def sync_positions(self, positions: Dict[str, 'LivePosition']) -> bool:
+        """
+        Reconciles broker-confirmed positions against the spread state machine.
+
+        Maps (qty_y, qty_x) tuples onto current_pos ∈ {-1, 0, 1}:
+            - (0, 0)       -> FLAT
+            - (+, -)       -> LONG SPREAD
+            - (-, +)       -> SHORT SPREAD
+            - anything else -> ANOMALY (returns False)
+
+        Held quantities are stored explicitly so exit orders use the *actual*
+        broker-confirmed sizes — not recomputed against the current β, which may
+        have drifted since the position was opened.
+        """
+        y_pos = positions.get(self.leg_y)
+        x_pos = positions.get(self.leg_x)
+
+        y_qty = y_pos.quantity if y_pos else 0.0
+        x_qty = x_pos.quantity if x_pos else 0.0
+
+        # CASE 1: Both legs flat.
+        if y_qty == 0 and x_qty == 0:
+            self.state['current_pos'] = 0
+            self.state['held_qty_y'] = 0.0
+            self.state['held_qty_x'] = 0.0
+            logger.info("🔄 Sync: Both legs flat. Strategy resumes in FLAT state.")
+            return True
+
+        # CASE 2: ANOMALY — naked leg. A spread strategy must never hold one side
+        # without the other. This indicates a failed exit, a partial fill, or a
+        # position from a different strategy that happens to share a symbol.
+        if (y_qty != 0) != (x_qty != 0):
+            logger.critical(
+                f"🚨 SPREAD ANOMALY: Naked leg detected. "
+                f"{self.leg_y}={y_qty}, {self.leg_x}={x_qty}. "
+                f"A pairs strategy cannot reconcile a one-legged position."
+            )
+            return False
+
+        # CASE 3: ANOMALY — both legs in the same direction. Not a hedged spread.
+        if (y_qty > 0 and x_qty > 0) or (y_qty < 0 and x_qty < 0):
+            logger.critical(
+                f"🚨 SPREAD ANOMALY: Both legs same direction (not a hedged spread). "
+                f"{self.leg_y}={y_qty}, {self.leg_x}={x_qty}."
+            )
+            return False
+
+        # CASE 4: LONG SPREAD (Long Y, Short X).
+        if y_qty > 0 and x_qty < 0:
+            self.state['current_pos'] = 1
+            self.state['held_qty_y'] = y_qty
+            self.state['held_qty_x'] = x_qty
+            self._log_hedge_ratio_drift(y_qty, x_qty)
+            logger.info(
+                f"🔄 Sync: LONG SPREAD resumed. "
+                f"Long {abs(y_qty):,.0f} {self.leg_y} / Short {abs(x_qty):,.0f} {self.leg_x}"
+            )
+            return True
+
+        # CASE 5: SHORT SPREAD (Short Y, Long X).
+        if y_qty < 0 and x_qty > 0:
+            self.state['current_pos'] = -1
+            self.state['held_qty_y'] = y_qty
+            self.state['held_qty_x'] = x_qty
+            self._log_hedge_ratio_drift(y_qty, x_qty)
+            logger.info(
+                f"🔄 Sync: SHORT SPREAD resumed. "
+                f"Short {abs(y_qty):,.0f} {self.leg_y} / Long {abs(x_qty):,.0f} {self.leg_x}"
+            )
+            return True
+
+        # Defensive: should be unreachable given the cases above.
+        logger.error("🚨 Unreachable branch in sync_positions. Treating as anomaly.")
+        return False
+
+    def _log_hedge_ratio_drift(self, y_qty: float, x_qty: float):
+        """
+        Warns if the held hedge ratio significantly differs from the current model β.
+        Drift happens naturally (β adapts over time) or unnaturally (positions came
+        from a different parameterization). Either way, exits will use ACTUAL held
+        quantities — this method only surfaces visibility.
+        """
+        if self.state['beta'] is None or self.state['beta'] == 0:
+            return
+
+        held_ratio = abs(x_qty) / abs(y_qty)
+        model_ratio = abs(self.state['beta'])
+        drift_pct = abs(held_ratio - model_ratio) / model_ratio * 100
+
+        if drift_pct > self.hedge_drift_threshold_pct:
+            logger.warning(
+                f"⚠️ HEDGE RATIO DRIFT: Held ratio = {held_ratio:.4f}, "
+                f"Current Model β = {model_ratio:.4f} ({drift_pct:.1f}% drift). "
+                f"Exit orders will use ACTUAL held quantities."
+            )
 
     def reset(self):
         """Clears state if the data feed drops."""
@@ -100,6 +206,8 @@ class KalmanPairsStrategy(BaseStrategy):
         self.state['beta'] = None
         self.state['P'] = 1.0
         self.state['errors'].clear()
+        # Note: We do NOT reset held_qty_* here. A data gap doesn't change broker
+        # positions; only re-sync via PortfolioManager should mutate held quantities.
 
     # ==========================================
     # 🔬 RESEARCH & BACKTESTING (Matrix Dictionary Input)
@@ -116,11 +224,11 @@ class KalmanPairsStrategy(BaseStrategy):
 
         # Initialize State Variables
         beta = np.zeros(n)
-        beta[0] = y[0] / x[0]  
-        P = np.zeros(n)      
-        P[0] = 1.0           
-        e = np.zeros(n)      
-        Q = np.zeros(n)      
+        beta[0] = y[0] / x[0]
+        P = np.zeros(n)
+        P[0] = 1.0
+        e = np.zeros(n)
+        Q = np.zeros(n)
         wt = self.delta / (1 - self.delta)
 
         # Vectorized Kalman Filter Pass
@@ -129,7 +237,7 @@ class KalmanPairsStrategy(BaseStrategy):
             P_hat = P[t-1] + wt
             e[t] = y[t] - (beta_hat * x[t])
             Q[t] = P_hat * (x[t]**2) + self.vt
-            K = P_hat * x[t] / Q[t] 
+            K = P_hat * x[t] / Q[t]
             beta[t] = beta_hat + K * e[t]
             P[t] = P_hat * (1 - K * x[t])
 
@@ -137,9 +245,9 @@ class KalmanPairsStrategy(BaseStrategy):
         err_series = pd.Series(e)
         rolling_mean = err_series.rolling(window=self.z_lookback).mean()
         rolling_std = err_series.rolling(window=self.z_lookback).std()
-        
+
         z_scores = np.where(rolling_std > 1e-8, (err_series - rolling_mean) / rolling_std, 0)
-        
+
         # Generate State-Machine Signals
         signal_y = np.zeros(n)
         current_pos = 0
@@ -151,29 +259,29 @@ class KalmanPairsStrategy(BaseStrategy):
 
             if current_pos == 0:
                 if z < -self.entry_z:
-                    current_pos = 1   
+                    current_pos = 1
                 elif z > self.entry_z:
-                    current_pos = -1  
+                    current_pos = -1
             elif current_pos == 1:
                 if z >= self.exit_z:
-                    current_pos = 0   
+                    current_pos = 0
             elif current_pos == -1:
                 if z <= -self.exit_z:
-                    current_pos = 0   
-            
+                    current_pos = 0
+
             signal_y[t] = current_pos
 
         # Construct Allocation Weights
         weights = pd.DataFrame(index=close_matrix.index)
         raw_weight_y = signal_y
-        raw_weight_x = -signal_y * beta 
-        
+        raw_weight_x = -signal_y * beta
+
         gross_exposure = np.abs(raw_weight_y) + np.abs(raw_weight_x)
         safe_exposure = np.where(gross_exposure > 0, gross_exposure, 1.0)
-        
+
         weights[self.leg_y] = raw_weight_y / safe_exposure
         weights[self.leg_x] = raw_weight_x / safe_exposure
-        
+
         return weights.fillna(0.0)
 
     # ==========================================
@@ -184,10 +292,9 @@ class KalmanPairsStrategy(BaseStrategy):
         if self.leg_y not in latest_bars.index or self.leg_x not in latest_bars.index:
             return StrategySignal(signal_type="AWAITING_DATA")
 
-        # Extract closing prices safely
         y_t = latest_bars.loc[self.leg_y, 'close']
         x_t = latest_bars.loc[self.leg_x, 'close']
-        
+
         if pd.isna(y_t) or pd.isna(x_t) or y_t <= 0 or x_t <= 0:
             return StrategySignal(signal_type="INVALID_PRICE")
 
@@ -211,16 +318,16 @@ class KalmanPairsStrategy(BaseStrategy):
 
         # 3. Dynamic Z-Scoring
         self.state['errors'].append(e_t)
-        
+
         if len(self.state['errors']) < self.z_lookback:
             return StrategySignal(signal_type="WARMUP_ZSCORE")
 
         errors_array = np.array(self.state['errors'])
         std_e = np.std(errors_array)
-        
+
         if std_e < 1e-8:
             return StrategySignal(signal_type="LOW_VOLATILITY")
-            
+
         mean_e = np.mean(errors_array)
         z = (e_t - mean_e) / std_e
 
@@ -229,7 +336,6 @@ class KalmanPairsStrategy(BaseStrategy):
         new_pos = current_pos
         signal = StrategySignal(signal_type="FLAT", meta={'z': z, 'beta': self.state['beta']})
 
-        # Logic: Flatten first before reversing to avoid margin spikes
         if current_pos == 0:
             if z < -self.entry_z:
                 new_pos = 1   # Long Spread
@@ -240,47 +346,70 @@ class KalmanPairsStrategy(BaseStrategy):
         elif current_pos == -1 and z <= -self.exit_z:
             new_pos = 0       # Flatten Short
 
-        # 5. Order Generation 
+        # 5. Order Generation
         if new_pos != current_pos:
             signal = self._generate_orders(new_pos, current_pos, signal, y_t, x_t)
             self.state['current_pos'] = new_pos
 
         return signal
 
-    def _generate_orders(self, new_pos: int, old_pos: int, base_signal: StrategySignal, price_y: float, price_x: float) -> StrategySignal:
+    def _generate_orders(self, new_pos: int, old_pos: int, base_signal: StrategySignal,
+                         price_y: float, price_x: float) -> StrategySignal:
         """
-        Translates a state transition into explicit IBKR orders, routing current prices 
-        for accurate Risk Manager gross exposure calculations.
+        Translates a state transition into explicit IBKR orders.
+
+        Entries are sized using base_qty and the current β.
+        Exits are sized using the ACTUAL broker-confirmed held quantities so we
+        flatten cleanly regardless of β drift between entry and exit.
         """
         base_signal.signal_type = f"TRANSITION_{old_pos}_TO_{new_pos}"
-        
+
         contract_y = self.instruments.get(self.leg_y)
         contract_x = self.instruments.get(self.leg_x)
-        
+
         if not contract_y or not contract_x:
             logger.error("Contracts not found in instruments mapping!")
             return base_signal
-        
-        # Calculate Hedge Ratio quantities (abs guarantees positive integers for IBKR)
-        qty_y = int(abs(self.base_qty))
-        qty_x = int(abs(self.base_qty * self.state['beta'])) 
-        
-        # If flatting out, reverse previous position
+
+        # --- EXIT PATH: Use actual held quantities ---
         if new_pos == 0:
-            if old_pos == 1:
+            qty_y = int(abs(self.state['held_qty_y']))
+            qty_x = int(abs(self.state['held_qty_x']))
+
+            if qty_y == 0 or qty_x == 0:
+                logger.error(
+                    f"🚨 EXIT REQUESTED but held quantities are zero. "
+                    f"State desync detected. held_y={qty_y}, held_x={qty_x}"
+                )
+                return base_signal
+
+            if old_pos == 1:  # Was Long Spread -> Sell Y, Buy X
                 base_signal.add_order(contract_y, action='SELL', qty=qty_y, estimated_price=price_y)
                 base_signal.add_order(contract_x, action='BUY', qty=qty_x, estimated_price=price_x)
-            elif old_pos == -1:
+            elif old_pos == -1:  # Was Short Spread -> Buy Y, Sell X
                 base_signal.add_order(contract_y, action='BUY', qty=qty_y, estimated_price=price_y)
                 base_signal.add_order(contract_x, action='SELL', qty=qty_x, estimated_price=price_x)
-        
-        # If entering new position        
-        elif new_pos == 1:
+
+            # Clear held quantities on exit (optimistic; PortfolioManager will
+            # correct on next boot if fills came in partial).
+            self.state['held_qty_y'] = 0.0
+            self.state['held_qty_x'] = 0.0
+            return base_signal
+
+        # --- ENTRY PATH: Use base_qty and current β ---
+        qty_y = int(abs(self.base_qty))
+        qty_x = int(abs(self.base_qty * self.state['beta']))
+
+        if new_pos == 1:  # Long Spread: Buy Y, Sell X
             base_signal.add_order(contract_y, action='BUY', qty=qty_y, estimated_price=price_y)
             base_signal.add_order(contract_x, action='SELL', qty=qty_x, estimated_price=price_x)
-            
-        elif new_pos == -1:
+            self.state['held_qty_y'] = float(qty_y)
+            self.state['held_qty_x'] = float(-qty_x)
+
+        elif new_pos == -1:  # Short Spread: Sell Y, Buy X
             base_signal.add_order(contract_y, action='SELL', qty=qty_y, estimated_price=price_y)
             base_signal.add_order(contract_x, action='BUY', qty=qty_x, estimated_price=price_x)
+            self.state['held_qty_y'] = float(-qty_y)
+            self.state['held_qty_x'] = float(qty_x)
 
         return base_signal

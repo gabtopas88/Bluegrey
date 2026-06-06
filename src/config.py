@@ -13,7 +13,7 @@ DATA_DIR.mkdir(exist_ok=True)
 # --- CONNECTIVITY ---
 IB_PORT = 7497
 IB_CLIENT_ID = 202
-ACCOUNT_ID = "" 
+ACCOUNT_ID = ""
 
 # --- DATABASE (ArcticDB) ---
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"
@@ -27,17 +27,23 @@ LIBS = {
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
 
 # --- STRATEGY SETTINGS ---
-STRATEGY_CLASS = "KalmanPairsStrategy" 
-STRATEGY_PARAMS = {} 
+STRATEGY_CLASS = "KalmanPairsStrategy"
+STRATEGY_PARAMS = {}
+
+# --- BOOT-TIME RECONCILIATION POLICY ---
+# What to do if broker positions can't be reconciled with strategy state on boot.
+#   'HALT'      : Refuse to start. Require human resolution. (Safest, default)
+#   'LIQUIDATE' : Flatten anomalous positions and start clean.
+#   'ADOPT'     : Let strategy guess. UNSAFE — controlled testing only.
+BOOT_ANOMALY_POLICY = 'HALT'
 
 # ==========================================
 # 🏭 THE CONTRACT FACTORY
 # ==========================================
 def build_contract(symbol: str, asset_class: str) -> Contract:
     """Dynamically builds IBKR Contract objects based on asset class rules."""
-    # Strip the Polygon "C:" prefix if it exists for FX
     clean_symbol = symbol.replace("C:", "") if asset_class == 'FX' else symbol
-    
+
     if asset_class == 'FX':
         return Forex(clean_symbol)
     elif asset_class == 'STK':

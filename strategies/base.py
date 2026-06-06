@@ -3,8 +3,13 @@ strategies/base.py
 The immutable contract for all Alpha models across Research and Production.
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, TYPE_CHECKING
 import pandas as pd
+
+if TYPE_CHECKING:
+    # Avoid circular import at runtime; PortfolioManager imports BaseStrategy too.
+    from src.portfolio import LivePosition
+
 
 @dataclass
 class StrategySignal:
@@ -16,13 +21,14 @@ class StrategySignal:
     orders: List[Dict[str, Any]] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
 
-    def add_order(self, contract: Any, action: str, qty: int, order_type: str = 'MKT', estimated_price: float = 1.0, volatility: float = None):
+    def add_order(self, contract: Any, action: str, qty: int, order_type: str = 'MKT',
+                  estimated_price: float = 1.0, volatility: float = None):
         """
         Helper method to guarantee all orders have the exact keys required by the Risk Manager.
         'contract' is kept as Any to keep this layer agnostic to IBKR's specific object classes.
         """
         symbol = contract.localSymbol if hasattr(contract, 'localSymbol') else str(contract)
-        
+
         self.orders.append({
             'symbol': symbol,
             'contract': contract,
@@ -32,6 +38,7 @@ class StrategySignal:
             'estimated_price': estimated_price,
             'volatility': volatility
         })
+
 
 class BaseStrategy:
     """
@@ -49,14 +56,39 @@ class BaseStrategy:
         """
         Returns the number of historical bars required to prime the strategy before live trading.
         """
-        return 0 # Default: No warmup required
+        return 0  # Default: No warmup required
 
     def prime_state(self, historical_data: Dict[str, pd.DataFrame]):
         """
         Receives historical data structured as a dictionary of matrices (e.g. {'close': df}).
         Override this in stateful strategies to fast-forward internal memory.
         """
-        pass # Default: Do nothing
+        pass  # Default: Do nothing
+
+    def sync_positions(self, positions: Dict[str, 'LivePosition']) -> bool:
+        """
+        Called by PortfolioManager at engine boot AFTER prime_state.
+        Reconciles broker-confirmed positions against the strategy's internal state machine.
+
+        :param positions: Dict of {symbol_key: LivePosition}. Empty dict means flat.
+        :return: True if positions map cleanly to a valid internal state.
+                 False if positions are anomalous and the engine should halt or liquidate.
+
+        Default behavior:
+          - Empty positions (flat) is always reconcilable -> True.
+          - Any held positions raise NotImplementedError, which PortfolioManager
+            interprets as "this strategy doesn't support resuming from non-flat state."
+
+        Stateful strategies that can resume across restarts MUST override this.
+        """
+        if not positions:
+            return True  # Flat is always reconcilable.
+
+        raise NotImplementedError(
+            f"{self.__class__.__name__} received live positions but does not "
+            f"implement sync_positions(). Override this method or run with "
+            f"no held positions at broker."
+        )
 
     # ==========================================
     # 🔬 RESEARCH INTERFACE (For the Optimizer)
@@ -67,7 +99,7 @@ class BaseStrategy:
         MUST be implemented for CPCV and Portfolio Vector Backtesting.
 
         :param data: A Dictionary of 2D feature matrices (e.g., data['close'] is Time x Tickers).
-        :return: pandas DataFrame of target weights (-1.0 to 1.0). 
+        :return: pandas DataFrame of target weights (-1.0 to 1.0).
                  Index = Datetime, Columns = Tickers.
         """
         raise NotImplementedError("Strategy must implement generate_signals() returning an N-dimensional DataFrame.")
