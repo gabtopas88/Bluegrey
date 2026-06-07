@@ -32,6 +32,55 @@ logger = logging.getLogger("Telemetry")
 
 
 # ==========================================
+# 🛡️ TRUST BOUNDARY SANITIZER
+# ==========================================
+# IBKR's TWS API protocol uses sentinel values to mean "field not set" instead
+# of nulls. UNSET_DOUBLE = sys.float_info.max ≈ 1.7976931348623157e+308. The
+# ib_async wire decoder applies `float(value or 0)` which catches None and
+# empty strings, but DOES NOT catch the sentinel string — "1.79...E308" parses
+# to a valid (but absurd) float. If that ever leaks through, casting it to
+# float here won't crash; it will silently corrupt the telemetry with garbage
+# that breaks every downstream aggregation.
+#
+# We treat this module as the trust boundary: anything sourced from IBKR's
+# wire protocol passes through _safe_ibkr_float once, exactly here. Anything
+# past this layer can be trusted by downstream consumers (parity harness,
+# dashboards, PnL reports).
+_IBKR_UNSET_DOUBLE = 1.7976931348623157e+308
+_IMPLAUSIBLE_MAGNITUDE = 1e15  # No legitimate trade value reaches this
+
+
+def _safe_ibkr_float(value, default: float = 0.0) -> float:
+    """
+    Defensive coercion of IBKR-sourced numerics.
+
+    Handles None, empty strings, NaN, the UNSET_DOUBLE sentinel, and any
+    other implausibly-large value that would corrupt aggregations. Anything
+    ambiguous becomes `default`.
+
+    Apply only to fields sourced from the IBKR wire protocol. Do NOT apply
+    to locally-computed values — they're trusted, and sanitizing them would
+    hide real bugs in our own code behind silent zeros.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    # NaN check (NaN != NaN is the canonical idiom)
+    if f != f:
+        return default
+    if abs(f) >= _IMPLAUSIBLE_MAGNITUDE:
+        logger.warning(
+            f"⚠️ IBKR sanitizer caught implausible value {f!r}. "
+            f"Substituting {default}. Likely UNSET_DOUBLE sentinel leak."
+        )
+        return default
+    return f
+
+
+# ==========================================
 # 📐 SCHEMAS — Single Source of Truth
 # ==========================================
 # Defined explicitly via PyArrow so dtype drift between sessions is impossible.
@@ -192,6 +241,9 @@ class TelemetryStore:
         market_snapshot: dict,
     ):
         """Called from main.py after every on_bar(), unconditionally."""
+        # Coerce to UTC-aware Timestamp regardless of input form:
+        #   - naive datetime/Timestamp -> tz_localize('UTC')
+        #   - tz-aware (any zone)      -> tz_convert('UTC')
         row = {
             'timestamp_utc':   pd.Timestamp(timestamp).tz_convert('UTC') if pd.Timestamp(timestamp).tz else pd.Timestamp(timestamp).tz_localize('UTC'),
             'strategy':        self.strategy_name,
@@ -221,6 +273,8 @@ class TelemetryStore:
     ):
         """Called from ExecutionHandler.execute_signal right after placeOrder()."""
         ts = timestamp or datetime.now(timezone.utc)
+        # All numeric fields here are sourced from our own strategy/execution
+        # layer (not the IBKR wire), so they're trusted — no sanitizer needed.
         row = {
             'timestamp_utc':        pd.Timestamp(ts).tz_convert('UTC') if pd.Timestamp(ts).tz else pd.Timestamp(ts).tz_localize('UTC'),
             'run_id':               self.run_id,
@@ -258,11 +312,25 @@ class TelemetryStore:
           BOT: positive bps = paid above the estimated price (bad)
           SLD: positive bps = received below the estimated price (bad)
         So positive slippage_bps always means cost was higher than modeled.
+
+        TRUST BOUNDARY: shares/price/commission/realized_pnl come from the
+        IBKR wire and pass through _safe_ibkr_float. estimated_price came
+        from our own ExecutionHandler.active_orders cache; slippage_bps is
+        computed locally below. Those two are trusted as-is.
         """
         ts = timestamp or datetime.now(timezone.utc)
 
-        if estimated_price and estimated_price > 0:
-            raw_bps = (price - estimated_price) / estimated_price * 10000.0
+        # Sanitize IBKR-sourced numerics at the trust boundary.
+        safe_shares       = _safe_ibkr_float(shares)
+        safe_price        = _safe_ibkr_float(price)
+        safe_commission   = _safe_ibkr_float(commission)
+        safe_realized_pnl = _safe_ibkr_float(realized_pnl)
+
+        # Slippage uses the sanitized price (post-trust-boundary) plus our own
+        # estimated_price (already trusted). Compute on sanitized inputs so a
+        # rogue fill price can't contaminate the slippage column.
+        if estimated_price and estimated_price > 0 and safe_price > 0:
+            raw_bps = (safe_price - estimated_price) / estimated_price * 10000.0
             slippage_bps = raw_bps if side.upper() in ('BOT', 'BUY') else -raw_bps
         else:
             slippage_bps = float('nan')
@@ -275,10 +343,10 @@ class TelemetryStore:
             'symbol':          symbol,
             'con_id':          int(con_id) if con_id else 0,
             'side':            side.upper(),
-            'shares':          float(shares),
-            'price':           float(price),
-            'commission':      float(commission),
-            'realized_pnl':    float(realized_pnl),
+            'shares':          safe_shares,
+            'price':           safe_price,
+            'commission':      safe_commission,
+            'realized_pnl':    safe_realized_pnl,
             'estimated_price': float(estimated_price) if estimated_price else float('nan'),
             'slippage_bps':    float(slippage_bps),
         }
