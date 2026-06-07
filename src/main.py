@@ -86,15 +86,21 @@ class TradingEngine:
         # 1. Prime the Strategy (Historical Warmup)
         self._prime_strategy()
 
-        # 2. Sync Live Portfolio (Inject broker reality into strategy state).
+        # 2. BIND EVENTS EARLY so that boot-time liquidations (if any) get
+        # captured by on_exec_details into telemetry. The portfolio sync may
+        # route liquidation orders through the executor; without the bindings
+        # in place, fills would still happen but the telemetry rows would not.
+        self.ib.orderStatusEvent += self.executor.on_order_status
+        self.ib.execDetailsEvent += self.executor.on_exec_details
+
+        # 3. Sync Live Portfolio (Inject broker reality into strategy state).
         if not self._sync_portfolio():
             logger.critical("🛑 Boot aborted: portfolio sync failed.")
             self.ib.disconnect()
             sys.exit(1)
 
-        # --- BIND EVENTS (CRITICAL FOR EXECUTION) ---
-        self.ib.orderStatusEvent += self.executor.on_order_status
-        self.ib.execDetailsEvent += self.executor.on_exec_details
+        # 4. Bind the tick handler last — we don't want on_tick firing before
+        # state is reconciled.
         self.ib.pendingTickersEvent += self.on_tick_event
 
         # Start Data Feed
@@ -150,10 +156,18 @@ class TradingEngine:
         """
         Reconciles broker state into strategy state.
         Solves the State Ephemerality problem on engine restart.
+
+        Passes the ExecutionHandler into PortfolioManager so that boot-time
+        liquidations (under LIQUIDATE policy) flow through the same order path
+        as runtime trades and land in the telemetry orders/fills streams.
         """
         logger.info("🔄 Syncing Live Portfolio...")
 
-        self.portfolio = PortfolioManager(self.ib, config.INSTRUMENTS)
+        self.portfolio = PortfolioManager(
+            self.ib,
+            config.INSTRUMENTS,
+            executor=self.executor,
+        )
         self.portfolio.initialize()
 
         policy = getattr(config, 'BOOT_ANOMALY_POLICY', PortfolioManager.POLICY_HALT)
@@ -188,6 +202,12 @@ class TradingEngine:
 
         # 3. RUN STRATEGY
         if not self.strategy:
+            return
+
+        # If the strategy has soft-halted (e.g. data gap during live exposure),
+        # do not feed it bars. We still drain the IBKR connection so order
+        # callbacks for any in-flight orders continue to land in telemetry.
+        if getattr(self.strategy, 'is_halted', lambda: False)():
             return
 
         signal = None

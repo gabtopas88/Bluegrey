@@ -46,7 +46,9 @@ class KalmanPairsStrategy(BaseStrategy):
             'errors': deque(maxlen=self.z_lookback),  # O(1) rolling window
             'current_pos': 0,                          # 0: Flat, 1: Long Spread, -1: Short Spread
             'held_qty_y': 0.0,                         # Signed broker-confirmed quantity for leg Y
-            'held_qty_x': 0.0                          # Signed broker-confirmed quantity for leg X
+            'held_qty_x': 0.0,                         # Signed broker-confirmed quantity for leg X
+            'halted': False,                           # Soft-halt flag set by reset() if blind
+            'halt_reason': None,                       # Human-readable reason, surfaced in meta
         }
 
     # ==========================================
@@ -201,13 +203,55 @@ class KalmanPairsStrategy(BaseStrategy):
             )
 
     def reset(self):
-        """Clears state if the data feed drops."""
-        logger.warning("Resetting Strategy State due to gap.")
+        """
+        Called by the Engine when a data gap is detected.
+
+        SAFETY-CRITICAL: Clearing β and the errors buffer makes the strategy
+        BLIND for ~z_lookback bars while the buffer refills (no z-score can be
+        computed during warmup). During that window, exit signals are impossible.
+
+        If we hold a live spread when this happens, we cannot manage that exposure
+        until the math re-warms. That is not an acceptable risk on real capital.
+
+        Policy:
+          - If FLAT: clear arrays normally. Strategy will re-warm and resume.
+          - If HOLDING: set a soft-halt flag. The engine reads this and refuses to
+            process further bars / signals. We do NOT raise SystemExit from a
+            deep callback — that would orphan IBKR connections and any in-flight
+            orders. The engine drains cleanly and the operator decides next steps
+            (manual liquidate, restart with sync, etc.).
+        """
+        logger.warning("Resetting Strategy State due to data gap.")
+
+        if self.state['current_pos'] != 0:
+            reason = (
+                "Data gap occurred while holding live spread exposure "
+                f"(current_pos={self.state['current_pos']}, "
+                f"held_y={self.state['held_qty_y']}, held_x={self.state['held_qty_x']}). "
+                "Kalman state cannot be safely reset without re-warmup. Halting strategy."
+            )
+            logger.critical(f"🛑 STRATEGY HALT: {reason}")
+            self.state['halted'] = True
+            self.state['halt_reason'] = reason
+            # Do NOT clear arrays. Held quantities and last-known math remain
+            # available for inspection / manual liquidation tooling. Engine
+            # must check is_halted() before invoking on_bar() again.
+            return
+
+        # Safe path: flat, no exposure at risk.
         self.state['beta'] = None
         self.state['P'] = 1.0
         self.state['errors'].clear()
         # Note: We do NOT reset held_qty_* here. A data gap doesn't change broker
         # positions; only re-sync via PortfolioManager should mutate held quantities.
+
+    def is_halted(self) -> bool:
+        """
+        Engine polls this each bar to decide whether to invoke on_bar().
+        Lives on the base interface so all strategies can opt into the same
+        soft-halt mechanism without engine-side strategy-type checks.
+        """
+        return bool(self.state.get('halted', False))
 
     # ==========================================
     # 📋 TELEMETRY HELPERS
@@ -230,6 +274,8 @@ class KalmanPairsStrategy(BaseStrategy):
             'errors_buffer':  len(self.state['errors']),
             'leg_y':          self.leg_y,
             'leg_x':          self.leg_x,
+            'halted':         bool(self.state.get('halted', False)),
+            'halt_reason':    self.state.get('halt_reason'),
         }
 
     # ==========================================
@@ -318,6 +364,11 @@ class KalmanPairsStrategy(BaseStrategy):
         _build_meta(), so the telemetry layer can persist a uniform decision row
         on every bar — including warmup/invalid bars where z is not computable.
         """
+        # Defence in depth: even if the engine forgets to gate on is_halted(),
+        # never emit a trading signal from a halted state.
+        if self.state.get('halted'):
+            return StrategySignal(signal_type="HALTED", meta=self._build_meta())
+
         if self.leg_y not in latest_bars.index or self.leg_x not in latest_bars.index:
             return StrategySignal(signal_type="AWAITING_DATA", meta=self._build_meta())
 

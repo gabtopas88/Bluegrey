@@ -8,6 +8,13 @@ from src.telemetry import TelemetryStore
 logger = logging.getLogger(__name__)
 
 
+# Terminal IBKR order statuses. Once an order hits any of these, the broker
+# will send no further events for it and we can safely evict it from our cache.
+# 'Inactive' is a soft-cancel state used by IBKR when an order is rejected before
+# transmission; treat it as terminal too.
+_TERMINAL_STATUSES = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
+
+
 class ExecutionHandler:
     """
     Asset-Agnostic Order Router & Manager.
@@ -25,9 +32,12 @@ class ExecutionHandler:
         self.telemetry = telemetry
 
         # State Tracking
-        # Map: IB_OrderID -> { 'signal_id': ..., 'symbol': ..., 'status': ..., 'estimated_price': ..., 'con_id': ... }
+        # Map: IB_OrderID -> { 'symbol', 'con_id', 'action', 'qty', 'status',
+        #                      'timestamp', 'estimated_price', 'signal_type' }
         # estimated_price and con_id are persisted so on_exec_details can denormalize them
         # onto the fill row without a lookup against persisted orders.
+        # Entries are evicted in on_order_status() once the order reaches a terminal
+        # state — bounding memory growth over long sessions.
         self.active_orders: Dict[int, dict] = {}
 
     def execute_signal(self, signal):
@@ -104,6 +114,11 @@ class ExecutionHandler:
     def on_order_status(self, trade: Trade):
         """
         Callback: Triggered when order status changes (Submitted -> Filled, etc.)
+
+        On terminal status, evicts the order from active_orders to bound memory.
+        IBKR sends execDetails (the fill callback that reads estimated_price)
+        BEFORE the final 'Filled' status event, so eviction here is safe — by
+        the time we see 'Filled', on_exec_details has already consumed the cache.
         """
         status = trade.orderStatus.status
         filled = trade.orderStatus.filled
@@ -114,6 +129,15 @@ class ExecutionHandler:
             self.active_orders[order_id]['status'] = status
 
         logger.info(f"📡 ORDER STATUS [ID:{order_id}]: {status} | Filled: {filled} | Rem: {remaining}")
+
+        # Bounded-cache eviction: drop terminal orders. Prevents memory growth
+        # over long-running sessions (weeks of paper trading produce thousands
+        # of orders; without eviction this dict grows monotonically).
+        if status in _TERMINAL_STATUSES and order_id in self.active_orders:
+            evicted = self.active_orders.pop(order_id)
+            logger.debug(
+                f"🧹 Evicted terminal order {order_id} ({evicted['symbol']}, {status})"
+            )
 
     def on_exec_details(self, trade: Trade, fill: Fill):
         """

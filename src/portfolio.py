@@ -14,12 +14,13 @@ periodic reconciliation and fill-driven updates.
 """
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from ib_async import IB, Contract, Position, MarketOrder
 
 if TYPE_CHECKING:
     from strategies.base import BaseStrategy
+    from src.execution import ExecutionHandler
 
 logger = logging.getLogger("PortfolioManager")
 
@@ -62,9 +63,18 @@ class PortfolioManager:
     POLICY_LIQUIDATE = 'LIQUIDATE'    # Flatten anomalous positions and start clean.
     POLICY_ADOPT = 'ADOPT'            # DANGEROUS: Let strategy guess. Logged but allowed.
 
-    def __init__(self, ib: IB, instruments: Dict[str, Contract]):
+    def __init__(self, ib: IB, instruments: Dict[str, Contract],
+                 executor: Optional['ExecutionHandler'] = None):
+        """
+        :param executor: Optional ExecutionHandler. If provided, LIQUIDATE policy
+                         routes liquidation orders through it so they appear in
+                         the telemetry orders/fills streams. If None, falls back
+                         to raw ib.placeOrder (UNLOGGED — only acceptable for
+                         emergency recovery when telemetry itself may be broken).
+        """
         self.ib = ib
         self.instruments = instruments
+        self.executor = executor
 
         # conId -> symbol_key map. We never trust symbol strings; conId is IBKR's
         # unique contract identifier and the only safe way to reconcile positions.
@@ -222,20 +232,58 @@ class PortfolioManager:
     def _liquidate_positions(self, positions: Dict[str, LivePosition]):
         """
         Emergency flatten. Sends MKT orders to zero out every managed position.
+
         Bypasses the normal Risk Manager — this is a recovery path that runs
-        before the event loop starts, and the alternative is leaving exposure unmanaged.
+        before the event loop starts, and the alternative is leaving exposure
+        unmanaged.
+
+        Routes through ExecutionHandler if available so the orders/fills appear
+        in the telemetry streams (signal_type='BOOT_LIQUIDATION'). If no
+        executor was injected, falls back to raw placeOrder with a loud warning
+        — that path is reserved for last-resort recovery when telemetry itself
+        may be the thing that's broken.
         """
-        for sym, pos in positions.items():
-            action = 'SELL' if pos.is_long else 'BUY'
-            qty = int(abs(pos.quantity))
+        # Build a synthetic StrategySignal so the executor can use its normal path.
+        # Import locally to avoid circular dependency at module load.
+        from strategies.base import StrategySignal
 
-            order = MarketOrder(action, qty)
-            trade = self.ib.placeOrder(pos.contract, order)
-
+        if self.executor is not None:
             logger.warning(
-                f"💣 LIQUIDATION FIRED: {action} {qty} {sym} "
-                f"(orderId={trade.order.orderId})"
+                "💣 Routing liquidation orders through ExecutionHandler "
+                "(will appear in telemetry as BOOT_LIQUIDATION)."
             )
+            signal = StrategySignal(signal_type='BOOT_LIQUIDATION')
+
+            for sym, pos in positions.items():
+                action = 'SELL' if pos.is_long else 'BUY'
+                qty = int(abs(pos.quantity))
+                # avg_cost is the best price proxy we have at this point; live
+                # market data may not have been requested yet. Slippage analysis
+                # against this baseline will be noisy but bounded.
+                signal.add_order(
+                    contract=pos.contract,
+                    action=action,
+                    qty=qty,
+                    order_type='MKT',
+                    estimated_price=pos.avg_cost,
+                )
+
+            self.executor.execute_signal(signal)
+        else:
+            # Fallback: no executor available. Raw orders, no telemetry.
+            logger.critical(
+                "⚠️ No ExecutionHandler available for liquidation. Using raw "
+                "ib.placeOrder — these fills will NOT appear in telemetry."
+            )
+            for sym, pos in positions.items():
+                action = 'SELL' if pos.is_long else 'BUY'
+                qty = int(abs(pos.quantity))
+                order = MarketOrder(action, qty)
+                trade = self.ib.placeOrder(pos.contract, order)
+                logger.warning(
+                    f"💣 LIQUIDATION FIRED (untelemetered): {action} {qty} {sym} "
+                    f"(orderId={trade.order.orderId})"
+                )
 
         # Give IBKR time to acknowledge and route the orders before we proceed.
         self.ib.sleep(2.0)
