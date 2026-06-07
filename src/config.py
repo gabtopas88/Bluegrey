@@ -28,6 +28,7 @@ LIBS = {
 # fills) plus session manifests, partitioned by UTC date.
 TELEMETRY_PATH = DATA_DIR / "telemetry"
 
+
 # --- DATA VENDORS ---
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
 
@@ -57,3 +58,17 @@ def build_contract(symbol: str, asset_class: str) -> Contract:
         return Crypto(clean_symbol, 'PAXOS', 'USD')
     else:
         raise ValueError(f"Unknown asset class: {asset_class}")
+    
+# ==========================================
+# 🌍 TRADING UNIVERSE
+# ==========================================
+# The instrument dictionary consumed by every engine component:
+#   - DataManager subscribes to these contracts
+#   - PortfolioManager qualifies them and uses conIds for reconciliation
+#   - The strategy receives this dict via __init__ and uses it for order construction
+# Keys must match what the strategy expects (e.g., KalmanPairsStrategy defaults
+# to 'C:AUDUSD' / 'C:NZDUSD' for leg_y / leg_x).
+INSTRUMENTS = {
+    'C:AUDUSD': build_contract('AUDUSD', 'FX'),
+    'C:NZDUSD': build_contract('NZDUSD', 'FX'),
+}

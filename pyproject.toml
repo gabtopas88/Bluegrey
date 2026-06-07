@@ -19,7 +19,7 @@ dependencies = [
     "scipy",            # Advanced Math (Kalman)
     "scikit-learn",     # Machine Learning / Regressions
     "arcticdb",         # Database
-    "pyarrow",          # Parquet engine for telemetry event log
+    "pyarrow>=14.0",          # Parquet engine for telemetry event log
     "streamlit",        # Dashboard
     "plotly",           # interactive charts
     "matplotlib",       # Static charts
