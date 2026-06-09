@@ -1,0 +1,387 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R 9 0 R 11 0 R] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 2103 >>
+stream
+BT
+/F1 10 Tf
+50 780 Td
+14 TL
+(Cross-Sectional Equity Dispersion ? Basket StatArb) Tj
+T*
+(Plan inicial de research para Bluegrey) Tj
+T*
+() Tj
+T*
+(Estado:) Tj
+T*
+(Research only. No live trading. No order submission. No edge validation yet.) Tj
+T*
+() Tj
+T*
+(Objetivo:) Tj
+T*
+(Investigar una estrategia intradía market-neutral sobre un microuniverso de acciones de) Tj
+T*
+(semiconductores estadounidenses y un ETF sectorial, inicialmente SMH, con SOXX como) Tj
+T*
+(alternativa.) Tj
+T*
+() Tj
+T*
+(Tesis:) Tj
+T*
+(Durante los primeros 30 minutos de la sesión regular de Nueva York, de 09:30 a 10:00 ET,) Tj
+T*
+(pueden aparecer dislocaciones relativas dentro de un sector. Algunas acciones pueden) Tj
+T*
+(moverse demasiado respecto al ETF sectorial y su beta; otras pueden quedarse rezagadas.) Tj
+T*
+(La estrategia rankea los residuales a las 10:00, compra underperformers residuales y) Tj
+T*
+(vende en corto outperformers residuales, construyendo una cesta dollar-neutral y beta-) Tj
+T*
+(neutral que se cierra antes del cierre.) Tj
+T*
+() Tj
+T*
+(Fases de trabajo:) Tj
+T*
+(Se elimina Fase 0 por decisión del usuario. El research comienza directamente en) Tj
+T*
+(dataset, notebook exploratorio y backtest reproducible.) Tj
+T*
+() Tj
+T*
+(Fase 1 ? Dataset mínimo:) Tj
+T*
+(- SMH 1-minute OHLCV.) Tj
+T*
+(- SOXX 1-minute OHLCV opcional.) Tj
+T*
+(- 30?50 acciones líquidas de semiconductores.) Tj
+T*
+(- Barras de 1 minuto en sesión regular.) Tj
+T*
+(- Corporate actions.) Tj
+T*
+(- Universo semiconductor.) Tj
+T*
+(- Earnings calendar si está disponible.) Tj
+T*
+(- Borrow / short availability si está disponible.) Tj
+T*
+(- Spreads o proxies de liquidez si están disponibles.) Tj
+T*
+() Tj
+T*
+(Fase 2 ? Notebook exploratorio:) Tj
+T*
+(Crear:) Tj
+T*
+(research/strategies/cross_sectional_equity_dispersion/notebooks/01_cross_sectional_dispe) Tj
+T*
+(rsion_semis_research.ipynb) Tj
+T*
+() Tj
+T*
+(Orden del notebook:) Tj
+T*
+(1. Cargar configuración.) Tj
+T*
+(2. Cargar universo.) Tj
+T*
+(3. Cargar barras intradía.) Tj
+T*
+(4. Validar calidad de datos.) Tj
+T*
+(5. Calcular retornos 09:30?10:00.) Tj
+T*
+(6. Estimar beta rolling.) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 1520 >>
+stream
+BT
+/F1 10 Tf
+50 780 Td
+14 TL
+(7. Calcular residual beta-adjusted.) Tj
+T*
+(8. Calcular z-score cross-sectional.) Tj
+T*
+(9. Seleccionar long bottom 20% y short top 20%.) Tj
+T*
+(10. Construir cesta dollar-neutral y beta-neutral.) Tj
+T*
+(11. Simular entrada y salida.) Tj
+T*
+(12. Aplicar costes.) Tj
+T*
+(13. Calcular métricas.) Tj
+T*
+(14. Guardar outputs.) Tj
+T*
+(15. Emitir decisión: reject, revise, expand o paper observation candidate.) Tj
+T*
+() Tj
+T*
+(Fase 3 ? Señal inicial:) Tj
+T*
+(Para cada acción i y fecha t:) Tj
+T*
+() Tj
+T*
+(r_stock = P_i,10:00 / P_i,09:30 - 1) Tj
+T*
+(r_etf = P_ETF,10:00 / P_ETF,09:30 - 1) Tj
+T*
+(beta_i = Cov\(r_stock, r_etf\) / Var\(r_etf\), usando solo fechas anteriores.) Tj
+T*
+(residual_i = r_stock - beta_i * r_etf) Tj
+T*
+(z_i = z-score cross-sectional del residual.) Tj
+T*
+() Tj
+T*
+(Long leg:) Tj
+T*
+(bottom 20% por z-score residual.) Tj
+T*
+() Tj
+T*
+(Short leg:) Tj
+T*
+(top 20% por z-score residual.) Tj
+T*
+() Tj
+T*
+(Fase 4 ? Backtest inicial:) Tj
+T*
+(Entrada:) Tj
+T*
+(VWAP 10:00?10:02 o siguiente barra.) Tj
+T*
+() Tj
+T*
+(Salida:) Tj
+T*
+(VWAP 15:53?15:55.) Tj
+T*
+() Tj
+T*
+(Restricciones:) Tj
+T*
+(- Sin posiciones overnight.) Tj
+T*
+(- Sin ejecución misma barra con lookahead.) Tj
+T*
+(- Dollar-neutral.) Tj
+T*
+(- Beta-neutral.) Tj
+T*
+(- Max 5% por nombre.) Tj
+T*
+(- ETF hedge opcional con SMH.) Tj
+T*
+(- Mínimo 25 nombres elegibles.) Tj
+T*
+(- Mínimo 5 longs y 5 shorts.) Tj
+T*
+() Tj
+T*
+(Costes:) Tj
+T*
+(Probar 1, 2, 5 y 10 bps por lado.) Tj
+T*
+() Tj
+T*
+(El backtest debe fallar si:) Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Length 1630 >>
+stream
+BT
+/F1 10 Tf
+50 780 Td
+14 TL
+(- Solo funciona antes de costes.) Tj
+T*
+(- Solo funciona a 1?2 bps.) Tj
+T*
+(- El PnL está dominado por earnings.) Tj
+T*
+(- El PnL está dominado por pocos días.) Tj
+T*
+(- La pata short no es borrowable.) Tj
+T*
+(- La beta realizada no es neutral.) Tj
+T*
+(- Hay lookahead, survivorship bias o same-bar execution bias.) Tj
+T*
+() Tj
+T*
+(Fase 5 ? Reporte:) Tj
+T*
+(Guardar:) Tj
+T*
+(- signals.csv) Tj
+T*
+(- positions.csv) Tj
+T*
+(- trades.csv) Tj
+T*
+(- daily_pnl.csv) Tj
+T*
+(- metrics.yaml) Tj
+T*
+(- cost_sensitivity.csv) Tj
+T*
+(- research_memo.md) Tj
+T*
+() Tj
+T*
+(Métricas principales:) Tj
+T*
+(- Total return.) Tj
+T*
+(- Daily PnL.) Tj
+T*
+(- Sharpe.) Tj
+T*
+(- Sortino.) Tj
+T*
+(- Max drawdown.) Tj
+T*
+(- Hit ratio.) Tj
+T*
+(- Turnover.) Tj
+T*
+(- Average gross exposure.) Tj
+T*
+(- Average net exposure.) Tj
+T*
+(- Realized beta exposure.) Tj
+T*
+(- Long leg PnL.) Tj
+T*
+(- Short leg PnL.) Tj
+T*
+(- ETF hedge PnL.) Tj
+T*
+(- Cost sensitivity.) Tj
+T*
+(- Capacity estimate.) Tj
+T*
+(- Performance by volatility regime.) Tj
+T*
+(- Performance by liquidity decile.) Tj
+T*
+(- Performance excluding earnings days.) Tj
+T*
+() Tj
+T*
+(Uso del repo:) Tj
+T*
+(- Usar research/ para notebooks y memos.) Tj
+T*
+(- Usar universes/ para definir el universo semiconductor.) Tj
+T*
+(- Usar src/data/DataStore para cargar matrices OHLCV si los datos ya están en ArcticDB.) Tj
+T*
+(- Usar src/data/UniverseManager como punto de partida para universos.) Tj
+T*
+(- Usar src/backtest/vector_backtester.py para backtest rápido multi-activo.) Tj
+T*
+(- No usar src/engine/execution.py en esta fase.) Tj
+T*
+(- No usar IBKR ni order routing.) Tj
+T*
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 8 0 R >>
+endobj
+10 0 obj
+<< /Length 510 >>
+stream
+BT
+/F1 10 Tf
+50 780 Td
+14 TL
+(- No usar live engine.) Tj
+T*
+() Tj
+T*
+(Decisiones permitidas:) Tj
+T*
+(- Reject.) Tj
+T*
+(- Revise.) Tj
+T*
+(- Expand.) Tj
+T*
+(- Move to paper observation candidate.) Tj
+T*
+() Tj
+T*
+(Decisión no permitida:) Tj
+T*
+(- Approved for live trading.) Tj
+T*
+() Tj
+T*
+(Conclusión:) Tj
+T*
+(El objetivo inmediato no es demostrar un edge, sino construir un research loop) Tj
+T*
+(reproducible:) Tj
+T*
+(tesis ? datos ? señal ? cartera ? simulación ? costes ? métricas ? memo ? decisión.) Tj
+T*
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 10 0 R >>
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000134 00000 n 
+0000000204 00000 n 
+0000002359 00000 n 
+0000002485 00000 n 
+0000004057 00000 n 
+0000004183 00000 n 
+0000005865 00000 n 
+0000005991 00000 n 
+0000006553 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R >>
+startxref
+6681
+%%EOF
