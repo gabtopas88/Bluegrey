@@ -24,7 +24,7 @@ LIBS = {
 }
 
 # --- DATA VENDORS ---
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
+POLYGON_API_KEY = os.environ["POLYGON_API_KEY"]
 
 # --- STRATEGY SETTINGS ---
 STRATEGY_CLASS = "KalmanPairStrategy" 
