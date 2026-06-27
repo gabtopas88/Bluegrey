@@ -25,6 +25,7 @@ services:
       - ENV=PRODUCTION
       - IB_HOST=host.docker.internal
       - IB_PORT=7497         # IB Gateway / TWS Port
+      - IB_CLIENT_ID=202
       - POLYGON_API_KEY=${POLYGON_API_KEY}
     # Overrides the Jupyter default command to run the headless entrypoint
     command: ["python", "-m", "src.main"]

@@ -11,8 +11,12 @@ DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 # --- CONNECTIVITY ---
-IB_PORT = 7497
-IB_CLIENT_ID = 202
+# IB_HOST and IB_PORT are env-driven so the Docker compose files (which set
+# IB_HOST=host.docker.internal) actually take effect. Native runs default to
+# localhost on the paper-trading port and behave exactly as before.
+IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
+IB_PORT = int(os.getenv("IB_PORT", "7497"))
+IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "202"))
 ACCOUNT_ID = ""
 
 # --- DATABASE (ArcticDB) ---
@@ -58,7 +62,7 @@ def build_contract(symbol: str, asset_class: str) -> Contract:
         return Crypto(clean_symbol, 'PAXOS', 'USD')
     else:
         raise ValueError(f"Unknown asset class: {asset_class}")
-    
+
 # ==========================================
 # 🌍 TRADING UNIVERSE
 # ==========================================

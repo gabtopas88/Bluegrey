@@ -269,7 +269,7 @@ class BacktestEngine:
             
             if returns.std() == 0:
                 print("⚠️ Returns volatility is zero (no active trades). Skipping Tearsheet.")
-                returnen 
+                return 
             
             os.makedirs("research/Tearsheets", exist_ok=True) 
             report_path = "research/Tearsheets/event_backtest_tearsheet.html"

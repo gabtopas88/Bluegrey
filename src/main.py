@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from ib_async import *
 
 # Local Imports
-import config
+from src import config
 from src.data import DataManager
 from src.execution import ExecutionHandler
 from src.risk import RiskManager
@@ -39,7 +39,9 @@ class TradingEngine:
         # 3. INFRASTRUCTURE
         self.data_manager = DataManager(self.ib, config.INSTRUMENTS)
         self.executor = ExecutionHandler(self.ib, telemetry=self.telemetry)
-        self.risk = RiskManager()
+        # RiskManager receives the universe so its symbol whitelist is derived
+        # from the same source of truth as every other component.
+        self.risk = RiskManager(instruments=config.INSTRUMENTS)
 
         # Portfolio Manager is constructed at boot, after IB connects.
         self.portfolio = None
@@ -73,8 +75,11 @@ class TradingEngine:
     def start(self):
         """Boot Sequence."""
         try:
-            logger.info("🔌 Connecting to IBKR...")
-            self.ib.connect('127.0.0.1', config.IB_PORT, clientId=config.IB_CLIENT_ID)
+            # IB_HOST is env-driven (defaults to 127.0.0.1). In Docker the
+            # compose file sets it to host.docker.internal so the container can
+            # reach TWS / IB Gateway on the host. Native runs are unaffected.
+            logger.info(f"🔌 Connecting to IBKR at {config.IB_HOST}:{config.IB_PORT} ...")
+            self.ib.connect(config.IB_HOST, config.IB_PORT, clientId=config.IB_CLIENT_ID)
             self.ib.reqMarketDataType(3)  # Delayed Data (switch to 1 for Live)
             logger.info("✅ Connected.")
         except Exception as e:
@@ -188,6 +193,9 @@ class TradingEngine:
         event = self.data_manager.on_tick(tickers)
 
         # --- RISK HEARTBEAT ---
+        # TODO: Replace dummy equity values with real account values from
+        # ib.accountSummary() before connecting real capital. Currently the
+        # drawdown kill switch cannot fire because these values never change.
         self.risk.update_state(current_equity=100000.0, start_of_day_equity=100000.0)
 
         if not self.data_manager.is_ready():
