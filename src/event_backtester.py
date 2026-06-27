@@ -231,8 +231,12 @@ class BacktestEngine:
                     # transition and queue the orders for next-bar execution.
                     # On rejection, roll back the staged transition so the
                     # strategy doesn't drift into a state it never reached.
+                    #
+                    # Issue fix: Risk may resize orders in place, so commit from the
+                    # POST-Risk signal — identical to the live engine — so held_qty_*
+                    # reflects approved sizes and the two paths stay in parity.
                     if self.risk.check(signal, current_time=timestamp.timestamp()):
-                        self.strategy.commit_pending_transition()
+                        self.strategy.commit_pending_transition(signal)
                         pending_orders.extend(signal.orders)
                     else:
                         self.strategy.rollback_pending_transition()

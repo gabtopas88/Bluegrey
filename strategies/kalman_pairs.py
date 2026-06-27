@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from collections import deque
 import logging
-from typing import Dict, TYPE_CHECKING
+from typing import Dict, Tuple, TYPE_CHECKING
 
 from strategies.base import BaseStrategy, StrategySignal
 
@@ -34,6 +34,12 @@ class KalmanPairsStrategy(BaseStrategy):
 
         # Production Execution Parameters
         self.base_qty = params.get('base_qty', 1000)  # Base unit for the Y leg
+
+        # Minimum tradable size per leg. Guards against a vanishing β (or tiny
+        # base_qty) rounding a leg quantity down to 0, which would fire a
+        # one-legged spread (zero-qty order rejected by IBKR; the other leg left
+        # naked). Configurable so FX-realistic odd-lot minimums can be raised.
+        self.min_order_qty = params.get('min_order_qty', 1)
 
         # Drift threshold for hedge-ratio warning (in %). If the live held ratio
         # differs from the current model β by more than this on boot, log loudly.
@@ -272,24 +278,70 @@ class KalmanPairsStrategy(BaseStrategy):
     # ==========================================
     # 🔄 PENDING-TRANSITION PROTOCOL
     # ==========================================
-    def commit_pending_transition(self):
+    def commit_pending_transition(self, approved_signal: StrategySignal = None):
         """
         Apply the staged state transition.
         Called by the engine after Risk approves the signal's orders.
+
+        ISSUE — post-Risk reconciliation: RiskManager.check() can shrink order
+        quantities IN PLACE before approval. The pending_transition was staged
+        from the PRE-Risk intended sizes, so committing it verbatim would record
+        a held quantity larger than what we actually send — and a later exit,
+        sized from held_qty_*, would then over-liquidate. For ENTRIES we instead
+        derive held_qty_* from the ACTUAL approved orders (post-Risk). Exits
+        flatten to zero regardless, so they keep the staged (0.0) values.
+
+        :param approved_signal: The post-Risk signal whose orders reflect any
+            resizing. If omitted, falls back to the staged values (preserves the
+            simple no-resize path and backward compatibility).
         """
         pending = self.state.get('pending_transition')
         if pending is None:
             return
 
-        self.state['current_pos'] = pending['current_pos']
-        self.state['held_qty_y'] = pending['held_qty_y']
-        self.state['held_qty_x'] = pending['held_qty_x']
+        new_pos = pending['current_pos']
+
+        if approved_signal is not None and new_pos != 0:
+            # ENTRY: reconcile against what was actually approved/sent.
+            held_y, held_x = self._held_from_orders(approved_signal)
+            self.state['held_qty_y'] = held_y
+            self.state['held_qty_x'] = held_x
+        else:
+            # EXIT (-> flat) or no signal supplied: use the staged values.
+            self.state['held_qty_y'] = pending['held_qty_y']
+            self.state['held_qty_x'] = pending['held_qty_x']
+
+        self.state['current_pos'] = new_pos
         self.state['pending_transition'] = None
 
         logger.debug(
             f"✅ Committed transition: current_pos={self.state['current_pos']}, "
             f"held=({self.state['held_qty_y']:.0f}, {self.state['held_qty_x']:.0f})"
         )
+
+    def _held_from_orders(self, signal: StrategySignal) -> Tuple[float, float]:
+        """
+        Derives signed held quantities (leg_y, leg_x) from a signal's ACTUAL
+        orders, so committed state reflects approved (possibly Risk-resized)
+        sizes rather than the pre-Risk staged guess.
+
+        Orders are matched to legs by contract object identity — the same
+        contract instances from self.instruments are passed into add_order — so
+        this is robust even when contracts are unqualified (localSymbol empty),
+        as happens inside the event backtester.
+        """
+        contract_y = self.instruments.get(self.leg_y)
+        contract_x = self.instruments.get(self.leg_x)
+
+        held_y = 0.0
+        held_x = 0.0
+        for o in signal.orders:
+            signed = float(o['qty']) if o['action'].upper() == 'BUY' else -float(o['qty'])
+            if o.get('contract') is contract_y:
+                held_y = signed
+            elif o.get('contract') is contract_x:
+                held_x = signed
+        return held_y, held_x
 
     def rollback_pending_transition(self):
         """
@@ -444,6 +496,10 @@ class KalmanPairsStrategy(BaseStrategy):
         y_t = latest_bars.loc[self.leg_y, 'close']
         x_t = latest_bars.loc[self.leg_x, 'close']
 
+        # A NaN close on either leg means that leg produced no bar this minute
+        # (DataManager now writes an explicit NaN row for tickless legs.
+        # Reject the incomplete cross-section rather than compute a
+        # spread from one fresh and one stale leg.
         if pd.isna(y_t) or pd.isna(x_t) or y_t <= 0 or x_t <= 0:
             return StrategySignal(signal_type="INVALID_PRICE", meta=self._build_meta())
 
@@ -517,11 +573,20 @@ class KalmanPairsStrategy(BaseStrategy):
         Exits are sized using the ACTUAL broker-confirmed held quantities so we
         flatten cleanly regardless of β drift between entry and exit.
 
+        Signal-type labelling (Issue 7): flatten transitions are labelled
+        EXIT_<old>_TO_0 and entries ENTRY_<old>_TO_<new>. RiskManager keys its
+        entry-sizing bypass AND its kill-switch liquidation allowance off the
+        substring "EXIT", so a flatten must carry that token to be treated as a
+        liquidation rather than misclassified as a fresh entry.
+
         STAGES the resulting state into self.state['pending_transition'] rather
         than mutating current_pos / held_qty_* directly. The actual mutation
         happens in commit_pending_transition() after Risk approval.
         """
-        base_signal.signal_type = f"TRANSITION_{old_pos}_TO_{new_pos}"
+        if new_pos == 0:
+            base_signal.signal_type = f"EXIT_{old_pos}_TO_0"
+        else:
+            base_signal.signal_type = f"ENTRY_{old_pos}_TO_{new_pos}"
 
         contract_y = self.instruments.get(self.leg_y)
         contract_x = self.instruments.get(self.leg_x)
@@ -562,6 +627,20 @@ class KalmanPairsStrategy(BaseStrategy):
         # --- ENTRY PATH: Use base_qty and current β ---
         qty_y = int(abs(self.base_qty))
         qty_x = int(abs(self.base_qty * self.state['beta']))
+
+        # Issue guard: a vanishing β (or a tiny base_qty) can round qty_x to
+        # 0, which would fire a one-legged spread (zero-qty order rejected by
+        # IBKR; the other leg left naked). Reject the whole entry if either leg
+        # is below the minimum tradable size. No transition is staged, so the
+        # strategy stays flat and the next bar re-evaluates cleanly.
+        if qty_y < self.min_order_qty or qty_x < self.min_order_qty:
+            logger.error(
+                f"🚨 ENTRY REJECTED: leg size below minimum tradable "
+                f"({self.min_order_qty}). qty_y={qty_y}, qty_x={qty_x}, "
+                f"beta={self.state['beta']:.6f}. No orders staged; strategy stays flat."
+            )
+            base_signal.signal_type = f"ENTRY_REJECTED_MINQTY_{old_pos}_TO_{new_pos}"
+            return base_signal
 
         if new_pos == 1:  # Long Spread: Buy Y, Sell X
             base_signal.add_order(contract_y, action='BUY', qty=qty_y, estimated_price=price_y)

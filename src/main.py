@@ -19,6 +19,9 @@ from src.telemetry import TelemetryStore
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s')
 logger = logging.getLogger("MainEngine")
 
+# Human-readable labels for IBKR market data modes (reqMarketDataType).
+_MARKET_DATA_MODES = {1: 'LIVE', 2: 'FROZEN', 3: 'DELAYED', 4: 'DELAYED-FROZEN'}
+
 
 class TradingEngine:
     def __init__(self):
@@ -80,7 +83,17 @@ class TradingEngine:
             # reach TWS / IB Gateway on the host. Native runs are unaffected.
             logger.info(f"🔌 Connecting to IBKR at {config.IB_HOST}:{config.IB_PORT} ...")
             self.ib.connect(config.IB_HOST, config.IB_PORT, clientId=config.IB_CLIENT_ID)
-            self.ib.reqMarketDataType(3)  # Delayed Data (switch to 1 for Live)
+
+            # Market data mode is config-driven. Paper accounts without
+            # live FX entitlements fall back to DELAYED(3); entitled runs set 1
+            # for LIVE via IB_MARKET_DATA_TYPE. The resolved mode is logged so
+            # the parity harness knows what data the live session actually traded on.
+            md_type = getattr(config, 'IB_MARKET_DATA_TYPE', 3)
+            self.ib.reqMarketDataType(md_type)
+            logger.info(
+                f"📶 Market data mode: {md_type} "
+                f"({_MARKET_DATA_MODES.get(md_type, 'UNKNOWN')})"
+            )
             logger.info("✅ Connected.")
         except Exception as e:
             logger.error(f"❌ Connection Failed: {e}")
@@ -251,7 +264,9 @@ class TradingEngine:
                 ts_value = latest_bars['time'].iloc[0]
             ts = pd.Timestamp(ts_value) if ts_value is not None else datetime.now(timezone.utc)
 
-            # Build market snapshot: {symbol_key: close_price}
+            # Build market snapshot: {symbol_key: close_price}.
+            # NaN closes (tickless legs) are excluded so the snapshot
+            # only ever carries real prices.
             snapshot = {}
             if 'close' in latest_bars.columns:
                 for sym in latest_bars.index:
@@ -288,15 +303,20 @@ class TradingEngine:
         self.state['pending_transition'] inside on_bar. Risk approval commits
         the staged state and sends orders; rejection rolls the staged state
         back so the strategy doesn't think it has a position it never opened.
+
+        Issue fix: RiskManager.check() may shrink order quantities IN PLACE. We
+        therefore pass the POST-Risk signal into commit_pending_transition() so
+        the strategy reconciles held_qty_* against what was actually approved/
+        sent — not the pre-Risk staged size — keeping a later exit correctly sized.
         """
         if not signal.orders:
             return
 
         if self.risk.check(signal):
-            # Risk approved. Commit the strategy's staged state transition
-            # BEFORE sending orders so our internal state reflects the trade
-            # we're about to make.
-            self.strategy.commit_pending_transition()
+            # Risk approved (and may have resized orders in place). Commit the
+            # strategy's staged state transition from the POST-Risk signal BEFORE
+            # sending orders so our internal state reflects the trade we make.
+            self.strategy.commit_pending_transition(signal)
             self.executor.execute_signal(signal)
         else:
             # Risk rejected. Roll back the staged transition so the strategy

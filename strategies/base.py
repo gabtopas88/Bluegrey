@@ -108,9 +108,16 @@ class BaseStrategy:
     # Strategies that don't stage transitions (simple stateless models) can
     # leave both methods as no-ops.
 
-    def commit_pending_transition(self):
+    def commit_pending_transition(self, approved_signal: StrategySignal = None):
         """
         Apply the strategy's staged state transition after Risk approves the signal.
+
+        :param approved_signal: The POST-Risk signal. RiskManager.check() may have
+            resized order quantities in place before approval, so stateful
+            strategies should reconcile their held-quantity state against the
+            ACTUAL approved order sizes rather than the pre-Risk staged guess.
+            Optional to preserve the simple no-resize contract.
+
         Default: no-op. Override in stateful strategies.
         """
         pass

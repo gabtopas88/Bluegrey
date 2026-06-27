@@ -19,6 +19,15 @@ IB_PORT = int(os.getenv("IB_PORT", "7497"))
 IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "202"))
 ACCOUNT_ID = ""
 
+# --- MARKET DATA MODE ---
+# reqMarketDataType code, was previously hardcoded to 3 in main.py.
+#   1 = LIVE, 2 = FROZEN, 3 = DELAYED, 4 = DELAYED-FROZEN
+# Defaults to 3 (DELAYED) so paper accounts without live FX entitlements work
+# out of the box; set IB_MARKET_DATA_TYPE=1 for LIVE when entitled. The engine
+# logs the resolved mode at boot so the parity harness knows what data the
+# live session actually traded on.
+IB_MARKET_DATA_TYPE = int(os.getenv("IB_MARKET_DATA_TYPE", "1"))
+
 # --- DATABASE (ArcticDB) ---
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"
 LIBS = {
@@ -38,7 +47,32 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb
 
 # --- STRATEGY SETTINGS ---
 STRATEGY_CLASS = "KalmanPairsStrategy"
-STRATEGY_PARAMS = {}
+
+# --- STRATEGY PARAMETERS ---
+# Previously {} — which silently fell back to the strategy's in-code defaults
+# and could drift from whatever the backtester was run with. These are pinned
+# explicitly so the live engine and the backtester read from one source of
+# truth. NOTE: parity-pinning only — every value below equals the existing
+# KalmanPairsStrategy default, so this is NOT a tuning change.
+STRATEGY_PARAMS = {
+    # Legs (must exist as keys in INSTRUMENTS below)
+    "leg_y": "C:AUDUSD",                # Dependent variable
+    "leg_x": "C:NZDUSD",                # Independent variable
+
+    # Signal thresholds
+    "entry_z": 2.0,
+    "exit_z": 0.0,
+    "z_lookback": 120,                  # 2h of 1-min bars; also warmup lookback
+
+    # Kalman filter variances
+    "delta": 1e-5,                      # How fast beta adapts
+    "vt": 1e-3,                         # Observation noise variance
+
+    # Execution sizing
+    "base_qty": 1000,                   # Base unit for the Y leg
+    "min_order_qty": 1,                 # reject entry if either leg < this
+    "hedge_drift_threshold_pct": 20.0,  # Boot-time hedge-ratio drift warning
+}
 
 # --- BOOT-TIME RECONCILIATION POLICY ---
 # What to do if broker positions can't be reconciled with strategy state on boot.
