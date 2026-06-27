@@ -49,6 +49,12 @@ class KalmanPairsStrategy(BaseStrategy):
             'held_qty_x': 0.0,                         # Signed broker-confirmed quantity for leg X
             'halted': False,                           # Soft-halt flag set by reset() if blind
             'halt_reason': None,                       # Human-readable reason, surfaced in meta
+            # 'pending_transition': dict | None
+            # Staged by _generate_orders when on_bar decides to change position.
+            # Holds the (current_pos, held_qty_y, held_qty_x) values that WOULD
+            # become real if Risk approves. Engine calls commit_pending_transition()
+            # to apply, or rollback_pending_transition() to discard.
+            'pending_transition': None,
         }
 
     # ==========================================
@@ -119,7 +125,13 @@ class KalmanPairsStrategy(BaseStrategy):
         Held quantities are stored explicitly so exit orders use the *actual*
         broker-confirmed sizes — not recomputed against the current β, which may
         have drifted since the position was opened.
+
+        Boot-time sync clears any stale pending_transition: at boot, the broker
+        is the source of truth and any in-memory staged transition is irrelevant.
         """
+        # A boot-time sync supersedes any in-memory staged transition.
+        self.state['pending_transition'] = None
+
         y_pos = positions.get(self.leg_y)
         x_pos = positions.get(self.leg_x)
 
@@ -242,6 +254,10 @@ class KalmanPairsStrategy(BaseStrategy):
         self.state['beta'] = None
         self.state['P'] = 1.0
         self.state['errors'].clear()
+        # Clear any stale pending_transition defensively (shouldn't exist between
+        # bars under normal flow, but reset() runs after a data gap where
+        # ordering guarantees may have broken).
+        self.state['pending_transition'] = None
         # Note: We do NOT reset held_qty_* here. A data gap doesn't change broker
         # positions; only re-sync via PortfolioManager should mutate held quantities.
 
@@ -252,6 +268,46 @@ class KalmanPairsStrategy(BaseStrategy):
         soft-halt mechanism without engine-side strategy-type checks.
         """
         return bool(self.state.get('halted', False))
+
+    # ==========================================
+    # 🔄 PENDING-TRANSITION PROTOCOL
+    # ==========================================
+    def commit_pending_transition(self):
+        """
+        Apply the staged state transition.
+        Called by the engine after Risk approves the signal's orders.
+        """
+        pending = self.state.get('pending_transition')
+        if pending is None:
+            return
+
+        self.state['current_pos'] = pending['current_pos']
+        self.state['held_qty_y'] = pending['held_qty_y']
+        self.state['held_qty_x'] = pending['held_qty_x']
+        self.state['pending_transition'] = None
+
+        logger.debug(
+            f"✅ Committed transition: current_pos={self.state['current_pos']}, "
+            f"held=({self.state['held_qty_y']:.0f}, {self.state['held_qty_x']:.0f})"
+        )
+
+    def rollback_pending_transition(self):
+        """
+        Discard the staged state transition.
+        Called by the engine after Risk rejects the signal's orders.
+        State remains at whatever it was before the rejected on_bar.
+        """
+        pending = self.state.get('pending_transition')
+        if pending is None:
+            return
+
+        self.state['pending_transition'] = None
+        logger.warning(
+            f"🔄 Rolled back transition: would have moved from "
+            f"current_pos={pending['from_pos']} to {pending['current_pos']}. "
+            f"State remains at current_pos={self.state['current_pos']}, "
+            f"held=({self.state['held_qty_y']:.0f}, {self.state['held_qty_x']:.0f})."
+        )
 
     # ==========================================
     # 📋 TELEMETRY HELPERS
@@ -265,17 +321,25 @@ class KalmanPairsStrategy(BaseStrategy):
         price, and low-volatility bars where z is not yet computable. This makes
         the live decisions stream directly comparable with the backtester's
         equivalent stream during parity-checks.
+
+        Includes pending_transition fields so a parity harness can detect
+        bars where the strategy proposed a transition that was rejected by Risk
+        (current_pos unchanged, but pending_current_pos was set).
         """
+        pending = self.state.get('pending_transition')
         return {
-            'z':              float(z) if z is not None and not pd.isna(z) else None,
-            'beta':           float(self.state['beta']) if self.state['beta'] is not None else None,
-            'P':              float(self.state['P']),
-            'current_pos':    int(self.state['current_pos']),
-            'errors_buffer':  len(self.state['errors']),
-            'leg_y':          self.leg_y,
-            'leg_x':          self.leg_x,
-            'halted':         bool(self.state.get('halted', False)),
-            'halt_reason':    self.state.get('halt_reason'),
+            'z':                   float(z) if z is not None and not pd.isna(z) else None,
+            'beta':                float(self.state['beta']) if self.state['beta'] is not None else None,
+            'P':                   float(self.state['P']),
+            'current_pos':         int(self.state['current_pos']),
+            'errors_buffer':       len(self.state['errors']),
+            'leg_y':               self.leg_y,
+            'leg_x':               self.leg_x,
+            'halted':              bool(self.state.get('halted', False)),
+            'halt_reason':         self.state.get('halt_reason'),
+            'pending_current_pos': pending['current_pos']  if pending else None,
+            'pending_held_qty_y':  pending['held_qty_y']   if pending else None,
+            'pending_held_qty_x':  pending['held_qty_x']   if pending else None,
         }
 
     # ==========================================
@@ -363,6 +427,11 @@ class KalmanPairsStrategy(BaseStrategy):
         Every return path attaches the strategy's full diagnostic state via
         _build_meta(), so the telemetry layer can persist a uniform decision row
         on every bar — including warmup/invalid bars where z is not computable.
+
+        State transitions (current_pos / held_qty_*) are STAGED into
+        pending_transition rather than mutated directly. The engine commits the
+        staged state after Risk approval, or rolls it back on rejection — see
+        the PENDING-TRANSITION PROTOCOL section above.
         """
         # Defence in depth: even if the engine forgets to gate on is_halted(),
         # never emit a trading signal from a halted state.
@@ -429,8 +498,12 @@ class KalmanPairsStrategy(BaseStrategy):
         # 5. Order Generation
         if new_pos != current_pos:
             signal = self._generate_orders(new_pos, current_pos, signal, y_t, x_t)
-            self.state['current_pos'] = new_pos
-            # Refresh meta AFTER the state mutation so current_pos reflects the new state
+            # State transition is STAGED in self.state['pending_transition'] by
+            # _generate_orders. We do NOT mutate current_pos here. The engine
+            # calls commit_pending_transition() after Risk approval (or
+            # rollback_pending_transition() on rejection).
+            #
+            # Refresh meta AFTER staging so it reflects the new pending_* fields.
             signal.meta = self._build_meta(z=z)
 
         return signal
@@ -443,6 +516,10 @@ class KalmanPairsStrategy(BaseStrategy):
         Entries are sized using base_qty and the current β.
         Exits are sized using the ACTUAL broker-confirmed held quantities so we
         flatten cleanly regardless of β drift between entry and exit.
+
+        STAGES the resulting state into self.state['pending_transition'] rather
+        than mutating current_pos / held_qty_* directly. The actual mutation
+        happens in commit_pending_transition() after Risk approval.
         """
         base_signal.signal_type = f"TRANSITION_{old_pos}_TO_{new_pos}"
 
@@ -472,10 +549,14 @@ class KalmanPairsStrategy(BaseStrategy):
                 base_signal.add_order(contract_y, action='BUY', qty=qty_y, estimated_price=price_y)
                 base_signal.add_order(contract_x, action='SELL', qty=qty_x, estimated_price=price_x)
 
-            # Clear held quantities on exit (optimistic; PortfolioManager will
-            # correct on next boot if fills came in partial).
-            self.state['held_qty_y'] = 0.0
-            self.state['held_qty_x'] = 0.0
+            # STAGE the exit transition. Actual clearing of held_qty_* happens
+            # in commit_pending_transition() after Risk approval.
+            self.state['pending_transition'] = {
+                'current_pos': 0,
+                'held_qty_y':  0.0,
+                'held_qty_x':  0.0,
+                'from_pos':    old_pos,
+            }
             return base_signal
 
         # --- ENTRY PATH: Use base_qty and current β ---
@@ -485,13 +566,21 @@ class KalmanPairsStrategy(BaseStrategy):
         if new_pos == 1:  # Long Spread: Buy Y, Sell X
             base_signal.add_order(contract_y, action='BUY', qty=qty_y, estimated_price=price_y)
             base_signal.add_order(contract_x, action='SELL', qty=qty_x, estimated_price=price_x)
-            self.state['held_qty_y'] = float(qty_y)
-            self.state['held_qty_x'] = float(-qty_x)
+            self.state['pending_transition'] = {
+                'current_pos': 1,
+                'held_qty_y':  float(qty_y),
+                'held_qty_x':  float(-qty_x),
+                'from_pos':    old_pos,
+            }
 
         elif new_pos == -1:  # Short Spread: Sell Y, Buy X
             base_signal.add_order(contract_y, action='SELL', qty=qty_y, estimated_price=price_y)
             base_signal.add_order(contract_x, action='BUY', qty=qty_x, estimated_price=price_x)
-            self.state['held_qty_y'] = float(-qty_y)
-            self.state['held_qty_x'] = float(qty_x)
+            self.state['pending_transition'] = {
+                'current_pos': -1,
+                'held_qty_y':  float(-qty_y),
+                'held_qty_x':  float(qty_x),
+                'from_pos':    old_pos,
+            }
 
         return base_signal

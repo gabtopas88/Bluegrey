@@ -91,6 +91,38 @@ class BaseStrategy:
         )
 
     # ==========================================
+    # 🔄 PENDING-TRANSITION PROTOCOL (Risk-aware state)
+    # ==========================================
+    # When a strategy decides to change position (e.g. enter/exit a spread), it
+    # STAGES the new state on itself but does NOT commit the mutation. The engine
+    # then calls risk.check() on the signal. Only if Risk approves does the
+    # engine call commit_pending_transition() — at which point the strategy
+    # actually mutates current_pos / held_qty_*. If Risk rejects, the engine
+    # calls rollback_pending_transition() and the strategy's state is unchanged.
+    #
+    # This prevents the cascade where a rejected entry leaves the strategy
+    # believing it holds a position that was never sent to the broker, causing
+    # the next bar's "exit" to actually open a phantom position in the opposite
+    # direction.
+    #
+    # Strategies that don't stage transitions (simple stateless models) can
+    # leave both methods as no-ops.
+
+    def commit_pending_transition(self):
+        """
+        Apply the strategy's staged state transition after Risk approves the signal.
+        Default: no-op. Override in stateful strategies.
+        """
+        pass
+
+    def rollback_pending_transition(self):
+        """
+        Discard the strategy's staged state transition after Risk rejects the signal.
+        Default: no-op. Override in stateful strategies.
+        """
+        pass
+
+    # ==========================================
     # 🔬 RESEARCH INTERFACE (For the Optimizer)
     # ==========================================
     def generate_signals(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:

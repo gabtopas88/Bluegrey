@@ -144,7 +144,9 @@ class BacktestEngine:
         
         self.strategy = strategy_class(instruments, params)
         self.broker = VirtualBroker(start_cap)
-        self.risk = RiskManager()
+        # RiskManager needs the universe so its symbol whitelist resolves
+        # against contract.localSymbol — mirrors the live engine wiring.
+        self.risk = RiskManager(instruments=instruments)
         
         self.risk.max_orders_per_minute = float('inf') 
         
@@ -224,8 +226,16 @@ class BacktestEngine:
                         start_of_day_equity=self.broker.initial_capital 
                     )
                     
+                    # Pending-transition protocol: mirror the live engine.
+                    # On Risk approval, commit the strategy's staged state
+                    # transition and queue the orders for next-bar execution.
+                    # On rejection, roll back the staged transition so the
+                    # strategy doesn't drift into a state it never reached.
                     if self.risk.check(signal, current_time=timestamp.timestamp()):
+                        self.strategy.commit_pending_transition()
                         pending_orders.extend(signal.orders)
+                    else:
+                        self.strategy.rollback_pending_transition()
 
             self.broker.mark_to_market(market_snapshot, timestamp)
 
@@ -269,7 +279,7 @@ class BacktestEngine:
             
             if returns.std() == 0:
                 print("⚠️ Returns volatility is zero (no active trades). Skipping Tearsheet.")
-                return 
+                return
             
             os.makedirs("research/Tearsheets", exist_ok=True) 
             report_path = "research/Tearsheets/event_backtest_tearsheet.html"

@@ -227,6 +227,8 @@ class TradingEngine:
             # --- TELEMETRY: record EVERY bar, unconditionally ---
             # This includes warmup, low-vol, and flat-no-transition bars.
             # The whole point is matching every timestamp the backtest saw.
+            # Note: this fires BEFORE Risk runs, so the decision row captures
+            # the strategy's INTENT including any staged pending_transition.
             self._record_decision(latest_bars, signal)
 
         # 4. EXECUTE
@@ -279,14 +281,28 @@ class TradingEngine:
             return default
 
     def _handle_signal(self, signal):
-        """Routes the signal to Risk and Execution."""
+        """
+        Routes the signal to Risk and Execution.
+
+        Pending-transition protocol: the strategy stages state mutations into
+        self.state['pending_transition'] inside on_bar. Risk approval commits
+        the staged state and sends orders; rejection rolls the staged state
+        back so the strategy doesn't think it has a position it never opened.
+        """
         if not signal.orders:
             return
 
         if self.risk.check(signal):
+            # Risk approved. Commit the strategy's staged state transition
+            # BEFORE sending orders so our internal state reflects the trade
+            # we're about to make.
+            self.strategy.commit_pending_transition()
             self.executor.execute_signal(signal)
         else:
+            # Risk rejected. Roll back the staged transition so the strategy
+            # doesn't believe it has a position it never opened.
             logger.warning("⛔ Signal rejected by Risk Manager.")
+            self.strategy.rollback_pending_transition()
 
 
 if __name__ == "__main__":
