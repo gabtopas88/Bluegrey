@@ -148,10 +148,20 @@ class TelemetryStore:
     per stream — exactly what range queries expect.
     """
 
-    def __init__(self, base_path: Path, strategy_name: str = "unknown"):
+    def __init__(self, base_path: Path, strategy_name: str = "unknown",
+                 session_context: Optional[dict] = None):
+        """
+        :param session_context: Optional dict of extra run metadata merged into
+            the session manifest (e.g. {'risk_mode': 'SHADOW', 'market_data_type': 3}).
+            Makes every run_id self-describing for the parity harness and audit —
+            "was this run risk-gated? what data did it trade on?" — without
+            re-deriving it from logs. Forward-compatible: Workstream B can add a
+            params_hash here so backtest/live runs key off the same identifier.
+        """
         self.base_path = Path(base_path)
         self.strategy_name = strategy_name
         self.run_id = str(uuid.uuid4())
+        self.session_context = session_context or {}
 
         # Ensure stream directories exist upfront.
         for stream in SCHEMAS.keys():
@@ -177,9 +187,14 @@ class TelemetryStore:
             'strategy':     self.strategy_name,
             'started_utc':  datetime.now(timezone.utc).isoformat(),
         }
+        # Merge caller-supplied run context (risk_mode, market_data_type, and
+        # later a params_hash). Explicit keys above win on collision.
+        for k, v in self.session_context.items():
+            manifest.setdefault(k, v)
+
         manifest_path = manifest_dir / f"{self.run_id}.json"
         with open(manifest_path, 'w') as f:
-            json.dump(manifest, f, indent=2)
+            json.dump(manifest, f, indent=2, default=str)
 
     def _path_for(self, stream: str, ts: datetime) -> Path:
         """Returns the Parquet file path for a given stream and timestamp."""

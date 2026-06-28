@@ -30,21 +30,36 @@ class TradingEngine:
         # 1. STRATEGY (Loaded first so we can tag telemetry with its name)
         self.strategy = self._load_strategy()
 
-        # 2. TELEMETRY STORE
+        # 2. RISK MANAGER (built before telemetry so the EFFECTIVE, validated
+        # enforcement mode can be recorded in the session manifest). Receives the
+        # universe so its symbol whitelist is derived from the same source of
+        # truth as every other component. RISK_MODE is env/config-driven:
+        # 'ENFORCE' (default) gates and resizes orders; 'SHADOW' only logs what it
+        # would do and lets orders through untouched (paper diagnostics only).
+        self.risk = RiskManager(
+            instruments=config.INSTRUMENTS,
+            mode=getattr(config, 'RISK_MODE', RiskManager.MODE_ENFORCE),
+        )
+
+        # 3. TELEMETRY STORE
         # One store per engine boot. New boot = new run_id. Written immediately
         # so a crash before connect() still leaves a session manifest behind.
+        # session_context tags the manifest with the effective risk mode and the
+        # market-data mode, so every run_id is self-describing for the parity
+        # harness and for audit ("was this run risk-gated?").
         telemetry_path = getattr(config, 'TELEMETRY_PATH', config.DATA_DIR / 'telemetry')
         self.telemetry = TelemetryStore(
             base_path=telemetry_path,
             strategy_name=self.strategy.__class__.__name__,
+            session_context={
+                'risk_mode':         self.risk.mode,
+                'market_data_type':  getattr(config, 'IB_MARKET_DATA_TYPE', 3),
+            },
         )
 
-        # 3. INFRASTRUCTURE
+        # 4. INFRASTRUCTURE
         self.data_manager = DataManager(self.ib, config.INSTRUMENTS)
         self.executor = ExecutionHandler(self.ib, telemetry=self.telemetry)
-        # RiskManager receives the universe so its symbol whitelist is derived
-        # from the same source of truth as every other component.
-        self.risk = RiskManager(instruments=config.INSTRUMENTS)
 
         # Portfolio Manager is constructed at boot, after IB connects.
         self.portfolio = None
@@ -52,6 +67,7 @@ class TradingEngine:
         logger.info(f"🤖 BLUEGREY ENGINE INITIALIZED.")
         logger.info(f"   Loaded Strategy: {self.strategy.__class__.__name__}")
         logger.info(f"   Universe: {list(config.INSTRUMENTS.keys())}")
+        logger.info(f"   Risk Mode: {self.risk.mode}")
         logger.info(f"   Run ID: {self.telemetry.run_id}")
 
     def _load_strategy(self):
@@ -298,33 +314,42 @@ class TradingEngine:
     def _handle_signal(self, signal):
         """
         Routes the signal to Risk and Execution.
-
+ 
         Pending-transition protocol: the strategy stages state mutations into
         self.state['pending_transition'] inside on_bar. Risk approval commits
         the staged state and sends orders; rejection rolls the staged state
         back so the strategy doesn't think it has a position it never opened.
-
-        Issue fix: RiskManager.check() may shrink order quantities IN PLACE. We
+ 
+        Issue 6: RiskManager.check() may shrink order quantities IN PLACE. We
         therefore pass the POST-Risk signal into commit_pending_transition() so
         the strategy reconciles held_qty_* against what was actually approved/
         sent — not the pre-Risk staged size — keeping a later exit correctly sized.
+ 
+        Risk modes: this routing is mode-agnostic. In ENFORCE mode check() may
+        resize/veto; in SHADOW mode check() only logs what it would do and always
+        returns True with the orders untouched. Either way, an approval commits
+        the staged transition from the (possibly-resized) signal and sends it; a
+        rejection rolls back. No special-casing is needed here — the mode lives
+        entirely inside the RiskManager.
         """
         if not signal.orders:
             return
-
+ 
         if self.risk.check(signal):
-            # Risk approved (and may have resized orders in place). Commit the
-            # strategy's staged state transition from the POST-Risk signal BEFORE
-            # sending orders so our internal state reflects the trade we make.
+            # Risk approved (ENFORCE may have resized orders in place; SHADOW
+            # leaves them untouched). Commit the strategy's staged state
+            # transition from the POST-Risk signal BEFORE sending orders so our
+            # internal state reflects the trade we make.
             self.strategy.commit_pending_transition(signal)
             self.executor.execute_signal(signal)
         else:
-            # Risk rejected. Roll back the staged transition so the strategy
-            # doesn't believe it has a position it never opened.
+            # Risk rejected (ENFORCE only — SHADOW never rejects). Roll back the
+            # staged transition so the strategy doesn't believe it has a position
+            # it never opened.
             logger.warning("⛔ Signal rejected by Risk Manager.")
             self.strategy.rollback_pending_transition()
-
-
+ 
+ 
 if __name__ == "__main__":
     eng = TradingEngine()
     eng.start()

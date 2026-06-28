@@ -26,6 +26,11 @@ services:
       - IB_HOST=host.docker.internal
       - IB_PORT=7497         # IB Gateway / TWS Port
       - IB_CLIENT_ID=202
+      # Risk enforcement mode. Safe default: ENFORCE. Override at launch with
+      # `RISK_MODE=shadow docker compose -f docker-compose.prod.yml up` to run a
+      # paper diagnostic where the RiskManager only logs what it would do.
+      # The ${VAR:-default} form keeps prod gated unless explicitly overridden.
+      - RISK_MODE=${RISK_MODE:-ENFORCE}
       - POLYGON_API_KEY=${POLYGON_API_KEY}
     # Overrides the Jupyter default command to run the headless entrypoint
     command: ["python", "-m", "src.main"]

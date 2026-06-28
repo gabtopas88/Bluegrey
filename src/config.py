@@ -19,14 +19,14 @@ IB_PORT = int(os.getenv("IB_PORT", "7497"))
 IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "202"))
 ACCOUNT_ID = ""
 
-# --- MARKET DATA MODE ---
+# --- MARKET DATA MODE (Issue 8) ---
 # reqMarketDataType code, was previously hardcoded to 3 in main.py.
 #   1 = LIVE, 2 = FROZEN, 3 = DELAYED, 4 = DELAYED-FROZEN
 # Defaults to 3 (DELAYED) so paper accounts without live FX entitlements work
 # out of the box; set IB_MARKET_DATA_TYPE=1 for LIVE when entitled. The engine
 # logs the resolved mode at boot so the parity harness knows what data the
 # live session actually traded on.
-IB_MARKET_DATA_TYPE = int(os.getenv("IB_MARKET_DATA_TYPE", "1"))
+IB_MARKET_DATA_TYPE = int(os.getenv("IB_MARKET_DATA_TYPE", "3"))
 
 # --- DATABASE (ArcticDB) ---
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"
@@ -48,7 +48,7 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb
 # --- STRATEGY SETTINGS ---
 STRATEGY_CLASS = "KalmanPairsStrategy"
 
-# --- STRATEGY PARAMETERS ---
+# --- STRATEGY PARAMETERS (Issue 12) ---
 # Previously {} — which silently fell back to the strategy's in-code defaults
 # and could drift from whatever the backtester was run with. These are pinned
 # explicitly so the live engine and the backtester read from one source of
@@ -70,7 +70,7 @@ STRATEGY_PARAMS = {
 
     # Execution sizing
     "base_qty": 1000,                   # Base unit for the Y leg
-    "min_order_qty": 1,                 # reject entry if either leg < this
+    "min_order_qty": 1,                 # Issue 11: reject entry if either leg < this
     "hedge_drift_threshold_pct": 20.0,  # Boot-time hedge-ratio drift warning
 }
 
@@ -80,6 +80,19 @@ STRATEGY_PARAMS = {
 #   'LIQUIDATE' : Flatten anomalous positions and start clean.
 #   'ADOPT'     : Let strategy guess. UNSAFE — controlled testing only.
 BOOT_ANOMALY_POLICY = 'HALT'
+
+# --- RISK ENFORCEMENT MODE ---
+# Controls whether the RiskManager actually vetoes / resizes orders, or merely
+# observes.
+#   'ENFORCE' (default): orders are gated and vol-target-resized before execution.
+#   'SHADOW'           : the RiskManager evaluates and LOGS what it would do, but
+#                        does NOT block or resize — orders flow through untouched.
+#                        For controlled paper-trading diagnostics only. NEVER run
+#                        SHADOW against real capital.
+# Env override: RISK_MODE=shadow (case-insensitive). Unknown values fall back to
+# ENFORCE inside the RiskManager (fail-safe). The effective mode is recorded in
+# the telemetry session manifest so every run_id is self-describing.
+RISK_MODE = os.getenv("RISK_MODE", "ENFORCE").upper()
 
 # ==========================================
 # 🏭 THE CONTRACT FACTORY

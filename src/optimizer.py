@@ -11,14 +11,23 @@ import seaborn as sns
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Anchor imports to your infrastructure
-from src.vector_backtester import VectorEngine
+# NOTE: the vectorized research engine is PortfolioVectorEngine (multi-asset,
+# DataFrame-in/DataFrame-out). The previous import name `VectorEngine` did not
+# exist in src/vector_backtester.py, so this module failed at import.
+from src.vector_backtester import PortfolioVectorEngine
 from src.cpcv import PurgedKFold
 
 class CPCVOptimizer:
     def __init__(self, df: pd.DataFrame, target_col: str, strategy_class, param_grid: dict, asset_class: str, max_lookback_bars: int):
         """
-        :param df: The raw historical dataframe (OHLCV). MUST have a DatetimeIndex.
-        :param target_col: The column to trade (usually 'close').
+        :param df: The historical CLOSE-price matrix (Index=Datetime, Columns=Tickers).
+                   This is the same shape the strategies consume via
+                   generate_signals({'close': df}) and the same shape
+                   PortfolioVectorEngine prices/aligns against. For a single-asset
+                   strategy this is simply a 1-column frame.
+        :param target_col: Retained for API compatibility / single-asset callers.
+                   Under the multi-asset contract the FULL close matrix is handed
+                   to the strategy and the engine, so this is informational only.
         :param strategy_class: The uninstantiated class inheriting from BaseStrategy.
         :param param_grid: Dictionary of parameters to test { 'fast_window': [10, 20], 'slow_window': [50, 100] }
         :param asset_class: 'STK', 'FX', or 'CRYPTO' (Required for exact fee modeling).
@@ -79,11 +88,17 @@ class CPCVOptimizer:
             
             # 2. Generate signals across the entire continuous dataframe 
             # (Rolling metrics do not leak future data, so this is safe and extremely fast)
-            target_weights = strategy.generate_signals(self.df)
+            # BaseStrategy.generate_signals expects a dict of matrices keyed by
+            # field; wrap the close matrix accordingly. Returns a target-weights
+            # DataFrame whose columns match the price matrix.
+            target_weights = strategy.generate_signals({'close': self.df})
             
             # 3. Execute Vector Engine to get exact Net Returns (Including Tiered IBKR Fees)
-            engine = VectorEngine(
-                prices=self.df[self.target_col], 
+            # PortfolioVectorEngine is multi-asset: prices and signals are both
+            # DataFrames with matching ticker columns. Feed the full close matrix
+            # as prices so per-asset returns/turnover align with the weights.
+            engine = PortfolioVectorEngine(
+                prices=self.df, 
                 signals=target_weights, 
                 asset_class=self.asset_class,
                 initial_capital=100000.0,
