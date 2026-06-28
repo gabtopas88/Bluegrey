@@ -26,7 +26,7 @@ ACCOUNT_ID = ""
 # out of the box; set IB_MARKET_DATA_TYPE=1 for LIVE when entitled. The engine
 # logs the resolved mode at boot so the parity harness knows what data the
 # live session actually traded on.
-IB_MARKET_DATA_TYPE = int(os.getenv("IB_MARKET_DATA_TYPE", "3"))
+IB_MARKET_DATA_TYPE = int(os.getenv("IB_MARKET_DATA_TYPE", "1"))
 
 # --- DATABASE (ArcticDB) ---
 ARCTIC_PATH = f"lmdb://{DATA_DIR}/arctic_db?map_size=100GB"
