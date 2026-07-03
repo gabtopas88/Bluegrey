@@ -22,7 +22,7 @@ ACCOUNT_ID = ""
 # --- MARKET DATA MODE (Issue 8) ---
 # reqMarketDataType code, was previously hardcoded to 3 in main.py.
 #   1 = LIVE, 2 = FROZEN, 3 = DELAYED, 4 = DELAYED-FROZEN
-# Defaults to 3 (DELAYED) so paper accounts without live FX entitlements work
+# Defaults to 1 (LIVE) - paper accounts without live FX entitlements only work with delayed data (3)
 # out of the box; set IB_MARKET_DATA_TYPE=1 for LIVE when entitled. The engine
 # logs the resolved mode at boot so the parity harness knows what data the
 # live session actually traded on.

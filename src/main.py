@@ -104,7 +104,7 @@ class TradingEngine:
             # live FX entitlements fall back to DELAYED(3); entitled runs set 1
             # for LIVE via IB_MARKET_DATA_TYPE. The resolved mode is logged so
             # the parity harness knows what data the live session actually traded on.
-            md_type = getattr(config, 'IB_MARKET_DATA_TYPE', 3)
+            md_type = getattr(config, 'IB_MARKET_DATA_TYPE', 1)
             self.ib.reqMarketDataType(md_type)
             logger.info(
                 f"📶 Market data mode: {md_type} "
