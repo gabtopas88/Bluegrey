@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bluegrey"
-version = "0.1.0"
+version = "0.1.1"
 description = "Bluegrey Algorithmic Trading Engine"
-authors = [{name = "Gabriel"}]
+authors = [{name = "Gabriel, Jordi, Mateo"}]
 readme = "README.md"
 requires-python = ">=3.9"
 
@@ -23,7 +23,14 @@ dependencies = [
     "plotly",           # interactive charts
     "matplotlib",       # Static charts
     "seaborn",          # Pretty charts
-    "jupyterlab"        # Research Environment
+    "jupyterlab",       # Research Environment
+    "ipykernel",        # Notebook kernel
+    "ipython",          # Notebook display utilities
+    "yfinance",         # Yahoo Finance CSV downloads
+    "pandas-ta-classic", # Technical indicators
+    "TA-Lib",           # More Technical indicators (used internally by pandas-ta-classic)
+    "joblib",           # Parallel grid searches
+    "quantstats"        # Research tearsheets
 ]
 
 [tool.setuptools.packages.find]
