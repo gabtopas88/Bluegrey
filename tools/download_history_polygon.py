@@ -223,6 +223,8 @@ if __name__ == "__main__":
     args = parse_args()
     
     ingestor = PolygonIngestor()
+    # ingestor = PolygonIngestor(market="equity", freq="day", multiplier=1, initial_date="2020-01-01", final_date=str(date.today()))
+
     logger.info(f"Ignition: Bluegrey Data Factory. Target: {config.ARCTIC_PATH}")
 
     ingestor.run_batch_job(
@@ -236,3 +238,18 @@ if __name__ == "__main__":
     )
 
     logger.info("Batch Job Complete.")
+
+
+"""
+Run this script from the command line like this:
+
+python tools/download_history_polygon.py \
+  --universe manual_equity \
+  --lib-name equity.day \
+  --timespan day \
+  --multiplier 1 \
+  --start-date 2009-01-01 \
+  --end-date 2019-12-31 \
+  --tickers ECH SPY QQQ DIA IWM EFA EEM
+
+"""
