@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import time
 from IPython.display import display
+import re   # use regex for CSV file
+from pathlib import Path
 
 # Data download
 import yfinance as yf
@@ -23,6 +25,10 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import SelectKBest, VarianceThreshold
+
+# Silence convergence warnings from MLPClassifier when max_iter is too low to converge
+import warnings
+from sklearn.exceptions import ConvergenceWarning
 
 # Feature analysis
 from scipy.stats import pearsonr
@@ -61,33 +67,49 @@ class MLPredictorStrategy(BaseStrategy):
         super().__init__(instruments or {}, params or {})    # initialises self.instruments and self.params 
                                                              # in the BaseStrategy parent class
 
-        self.symbol = self.params.get("symbol", "ECH")
-        self.signal_threshold = self.params.get("signal_threshold", 0.02)  # delimiter of '0' signal from above and below – log-return units
-        self.n_features = self.params.get("n_features", 8)
-        self.position_size = self.params.get("position_size", 0.10)
+        try:
+            self.symbol = self.params["symbol"]
+        except KeyError as exc:
+            raise ValueError("Missing required strategy parameter: symbol") from exc
+        
+        self.signal_threshold = self.params.get("signal_threshold", 0.002)  # delimiter of '0' signal from above and below – log-return units
+        self.n_features = self.params.get("n_features", 6)
+        self.position_size = self.params.get("position_size", 1.0)
 
-        self.start_date = self.params.get("start_date", "2008-01-01")
-        self.end_date = self.params.get("end_date", "2020-01-01")
+        self.start_date = self.params.get("start_date", "2025-01-01")
+        self.end_date = self.params.get("end_date", "2026-01-01")
         self.training_years = self.params.get("training_years", 10)
         self.indicator_warmup_years = self.params.get("indicator_warmup_years", 1)  # extra data to download before training window to account for indicators that require more history (e.g. DPO with length 20 would need at least 20 days of data before the training window starts)
 
+        self.download_data = self.params.get("download_data", False)
+        self.adj_method = self.params.get("adj_method", "corporate_actions")
+        valid_adj_methods = {"corporate_actions", "adj_close_ratio"}
+        if self.adj_method not in valid_adj_methods:
+            raise ValueError(f"adj_method must be one of {valid_adj_methods}")
+
         self.nan_threshold = self.params.get("nan_threshold", 0.05)
         self.random_state = self.params.get("random_state", 42)
-        self.max_iter = self.params.get("max_iter", 2000)
+        self.max_iter = self.params.get("max_iter", 5000)
         self.verbose = self.params.get("verbose", True)
-        self.model = None      # set model to None initially, will be defined in build_pipeline() later
 
 
 
-    def download_dataset(self, symbol: str = None, start_date: str = None, end_date: str = None, training_years: float = None) -> pd.DataFrame:
+    def download_dataset(self, symbol: str = None, start_date: str = None, end_date: str = None, actions: bool = None, training_years: float = None, indicator_warmup_years: float = None) -> pd.DataFrame:
 
         symbol = symbol or self.symbol
         start_date = start_date or self.start_date
         end_date = end_date or self.end_date
-        training_years = training_years or self.training_years
-        indicator_warmup_years = self.indicator_warmup_years
 
-        # Download extra data for training window
+        # Download corporate actions only if they're needed or else if explicitly asked for
+        if self.adj_method == "corporate_actions":
+            actions = True
+        elif self.adj_method == "adj_close_ratio":
+            actions = actions or False
+        
+        training_years = self.training_years if training_years is None else training_years
+        indicator_warmup_years = self.indicator_warmup_years if indicator_warmup_years is None else indicator_warmup_years
+
+        # Download extra data for warmup window
         start_date_download = pd.to_datetime(start_date) - pd.DateOffset(years=training_years + indicator_warmup_years)
         start_date_download = start_date_download.strftime("%Y-%m-%d")
 
@@ -99,24 +121,184 @@ class MLPredictorStrategy(BaseStrategy):
 
         # Download data from Yahoo Finance
         df = yf.download(
-            symbol,
+            tickers=symbol,
             start=start_date_download,
-            end=end_date,                   # Note: 'end' is exlusive
-            auto_adjust=True,
-            progress=self.verbose
+            end=end_date,                   # Note: 'end' is exclusive
+            actions=actions, 
+            auto_adjust=False,
+            progress=self.verbose,
+            threads=True,
+            timeout=20,
+            multi_level_index=False,
             )
 
         # Since we only download one ticker, remove unnecessary Ticker MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Keep only OHLCV columns (auto-adjusted from download) and make a copy
-        df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+        df.rename(columns={
+            "Adj Close": "Adj_Close",
+            "Stock Splits": "Stock_Splits",
+            "Capital Gains": "Capital_Gains",
+            },
+            inplace=True,
+        )
 
-        df.columns.name = self.symbol
+        df.columns.name = symbol
 
         return df
     
+
+
+    def load_stored_dataset(self, symbol: str = None, start_date: str = None, end_date: str = None, training_years: float = None, indicator_warmup_years: float = None) -> pd.DataFrame:
+
+        symbol = symbol or self.symbol
+        start_date = start_date or self.start_date
+        end_date = end_date or self.end_date
+        training_years = self.training_years if training_years is None else training_years
+        indicator_warmup_years = self.indicator_warmup_years if indicator_warmup_years is None else indicator_warmup_years
+
+        # Load extra data for warmup window
+        start_date_load = pd.to_datetime(start_date) - pd.DateOffset(years=training_years + indicator_warmup_years)
+        start_date_load = start_date_load.strftime("%Y-%m-%d")
+
+        # =========================
+        # Load stored data
+        # =========================
+        if self.verbose:
+            print(f"⬇️ Loading stored data for {symbol} from {start_date_load} to {end_date}...")
+
+        # Locate the Yahoo data directory relative to the repo root
+        repo_root = Path(__file__).resolve().parents[3]
+        yahoo_root = repo_root / "src" / "data" / "yahoo"
+
+        # Use regex to match the symbol to the filename: subsitute any 
+        # non-letter-number-dot-underscore-hyphen with an underscore, and strip leading/trailing underscores
+        safe_symbol = re.sub(r"[^A-Za-z0-9._-]+", "_", symbol).strip("_")
+        # Find all matching CSV for the symbol in the Yahoo directory
+        csv_matches = list(yahoo_root.glob(f"*/1d/{safe_symbol}.csv"))
+
+        # Raise an error if none or multiple matching CSV files are found
+        if not csv_matches:
+            raise FileNotFoundError(f"No stored Yahoo CSV found for {symbol} under {yahoo_root}")
+        if len(csv_matches) > 1:
+            raise ValueError(f"Multiple stored Yahoo CSVs found for {symbol}: {csv_matches}")
+
+        # Load the CSV into a DataFrame and keep the selected date range
+        df = pd.read_csv(csv_matches[0], parse_dates=["Timestamp"])
+        df = df[(df["Timestamp"] >= start_date_load) & (df["Timestamp"] < end_date)].copy()        # Note: 'end' is exclusive like in download_dataset()
+        df.set_index("Timestamp", inplace=True)
+
+        df.columns.name = symbol
+
+        return df
+    
+
+
+    def adjust_dataset(self, df: pd.DataFrame, adjustment_method: str = "corporate_actions") -> pd.DataFrame:
+
+        # Check that the raw dataset has the OHLCV columns needed for and after adjustment
+        required_cols = ["Open", "High", "Low", "Close", "Volume"]
+        if adjustment_method == "corporate_actions":
+            required_cols += ["Dividends"]
+        elif adjustment_method == "adj_close_ratio":
+            required_cols += ["Adj_Close"]
+        else:
+            raise ValueError("adjustment_method must be 'corporate_actions' or 'adj_close_ratio'")
+
+        # Error if some required column is missing
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Cannot adjust dataset. Missing columns: {missing_cols}")
+
+        # Work on a copy so the original DataFrame is not changed in place
+        adjusted_df = df.copy()
+
+        # Choose how to calculate the price adjustment factor
+        if adjustment_method == "corporate_actions":
+            adjustment_factor = self.calculate_adjustment_factor(adjusted_df)
+        elif adjustment_method == "adj_close_ratio":
+            adjustment_factor = self.calculate_adj_close_ratio_factor(adjusted_df)
+
+        # Apply the same adjustment factor to all OHLC prices
+        for col in ["Open", "High", "Low", "Close"]:
+            adjusted_df[col] = adjusted_df[col] * adjustment_factor
+
+        # When using Yahoo's own ratio, force Close to Adj_Close exactly
+        if adjustment_method == "adj_close_ratio":
+            adjusted_df["Close"] = adjusted_df["Adj_Close"]
+
+        # Keep only (adjusted) OHLCV columns and make a copy
+        adjusted_df = adjusted_df[["Open", "High", "Low", "Close", "Volume"]].copy()
+        
+        return adjusted_df
+    
+
+
+    def calculate_adj_close_ratio_factor(self, df: pd.DataFrame) -> pd.Series:
+
+        # Check that the raw dataset has the inputs needed for the ratio
+        required_cols = ["Close", "Adj_Close"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Cannot calculate Adj_Close ratio factor. Missing columns: {missing_cols}")
+
+        # Calculate Yahoo's implied adjustment factor from adjusted close versus raw close
+        adjustment_factor = df["Adj_Close"] / df["Close"]
+
+        # Replace divide-by-zero infinities with NaN so bad rows do not become infinite prices
+        adjustment_factor = adjustment_factor.replace([np.inf, -np.inf], np.nan)
+
+        return adjustment_factor
+
+
+
+    def calculate_adjustment_factor(self, df: pd.DataFrame) -> pd.Series:
+
+        # NOTE: Yahoo's OHLC prices are ALREADY SPLIT-ADJUSTED even when auto_adjust=False, 
+        # so we do not reapply Stock_Splits to adjustment factor
+
+        # Check that the raw dataset has the inputs needed to calculate adjustments
+        required_cols = ["Close", "Dividends"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Cannot calculate adjustment factor. Missing columns: {missing_cols}")
+
+        # Keep the original index so the returned factor lines up with the input data
+        original_index = df.index
+
+        # Include capital gains when Yahoo provides them, mostly for funds/ETFs
+        optional_cols = [col for col in ["Capital_Gains"] if col in df.columns]
+
+        # Work on a date-sorted copy because cumulative adjustments depend on time order
+        actions_df = df[required_cols + optional_cols].copy().sort_index()
+
+        # Convert inputs to numeric values and treat missing actions as no action
+        close = pd.to_numeric(actions_df["Close"], errors="coerce")
+        dividends = pd.to_numeric(actions_df["Dividends"], errors="coerce").fillna(0.0)
+        if "Capital_Gains" in actions_df.columns:
+            capital_gains = pd.to_numeric(actions_df["Capital_Gains"], errors="coerce").fillna(0.0)
+        else:
+            capital_gains = pd.Series(0.0, index=actions_df.index)
+        cash_distributions = dividends + capital_gains
+
+        # Start with no adjustment on every date
+        event_factor = pd.Series(1.0, index=actions_df.index)
+
+        # Cash distribution adjustment uses the close from the day before the ex-date
+        previous_close = close.shift(1)
+        distribution_factor = (previous_close - cash_distributions) / previous_close
+        valid_distribution = cash_distributions.ne(0.0) & previous_close.notna() & previous_close.ne(0.0)
+        event_factor.loc[valid_distribution] *= distribution_factor.loc[valid_distribution]
+
+        # Apply each event only to dates before the event date, not to the event date itself
+        adjustment_factor = event_factor.iloc[::-1].cumprod().iloc[::-1] / event_factor
+
+        # Return the factor in the same row order as the input DataFrame
+        adjustment_factor = adjustment_factor.reindex(original_index)
+
+        return adjustment_factor
+
 
 
     def assign_signal(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -126,7 +308,7 @@ class MLPredictorStrategy(BaseStrategy):
         # =========================
 
         if self.verbose:
-            print("🧪 Assigning singal to historic dataset...")
+            print("🧪 Assigning signal to historic dataset...")
 
         # Compute next days' Open
         df["Open_t+1"] = df["Open"].shift(-1)
@@ -148,14 +330,16 @@ class MLPredictorStrategy(BaseStrategy):
 
     def compute_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
 
-        # ==================================================================
-        # Compute all technical indicators with Pandas-TA and TA-Lib
-        # ==================================================================
+        # =============================================================================================
+        # Compute all technical indicators with Pandas-TA (and TA-Lib internally if installed)
+        # =============================================================================================
 
         if self.verbose:
             print("🧪 Computing technical indicators...")
 
         # Run "strategy" to compute and append all available technical indicators.
+        # Disable pandas-ta's inner multiprocessing when this strategy runs inside joblib/loky.
+        df.ta.cores = 0
         df.ta.strategy(lookahead=False)
 
         # Drop DPO created by df.ta.strategy(), because default DPO may be centered/lookahead-biased
@@ -176,7 +360,7 @@ class MLPredictorStrategy(BaseStrategy):
                                "TOS_STDEVALL_U_3"], errors="ignore")
 
         # Recompute TOS_STDEVALL indicator for finite lengths
-        for length in [30, 90, 180, 252, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000]: 
+        for length in [21, 63, 126, 252, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000]: 
             if length < len(df):
                 # linear regression
                 lr = df.ta.linreg(close="Close", length=length, append=False)
@@ -188,6 +372,14 @@ class MLPredictorStrategy(BaseStrategy):
                 for n in [1, 2, 3]:
                     df[f"TOS_STDEVALL_{length}_L_{n}"] = lr - n * sd
                     df[f"TOS_STDEVALL_{length}_U_{n}"] = lr + n * sd
+
+        # Include more increasing and decreasing pattern indicators (INC_n and DEC_n) for n=2 to 10 days back 
+        # (n=1 is already included by df.ta.strategy() )
+        # These track if the  Close price has been increasing or decreasing for n consecutive days, which may be useful for trend detection.
+        for n in range(2, 11):
+            df[f"INC_{n}"] = df.ta.increasing(close="Close", length=n, strict=True, asint=True, append=True)
+
+            df[f"DEC_{n}"] = df.ta.decreasing(close="Close", length=n, strict=True, asint=True, append=True)
 
 
         return df
@@ -204,7 +396,7 @@ class MLPredictorStrategy(BaseStrategy):
 
         # Find total number of columns (technical indicators) and how many were added by Pandas-TA
         n_total = len(cols)
-        n_added = n_total - 9  # there were already 9 to start with
+        n_added = n_total - 8  # there were already 8 to start with: OHLCV, Open_t+1, Open_t+2, Signal
 
         # Display all column names
         print(cols)
@@ -261,6 +453,9 @@ class MLPredictorStrategy(BaseStrategy):
 
         if self.verbose:
             print("🧹 Cleaning dataset...")
+
+        # convert any infinite values to NaN (which will be dropped later)
+        df = df.replace([np.inf, -np.inf], np.nan)
 
         # store row and column info before cleaning
         rows_before_cleaning = [df.shape[0], df.index.strftime("%Y-%m-%d").tolist()]
@@ -327,8 +522,12 @@ class MLPredictorStrategy(BaseStrategy):
 
     def prepare_dataset(self) -> pd.DataFrame:
     
+        if self.download_data:
+            df = self.download_dataset()
+        else:
+            df = self.load_stored_dataset()
 
-        df = self.download_dataset()
+        df = self.adjust_dataset(df, adjustment_method=self.adj_method)
 
         df = self.assign_signal(df)
 
@@ -381,8 +580,11 @@ class MLPredictorStrategy(BaseStrategy):
         # Create a fresh model pipeline for this date.
         model = self.build_pipeline()
 
-        # Train the model using only the training window.
-        model.fit(X_train, y_train)
+        # Silence convergence warnings if max_iter is too low
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=ConvergenceWarning)
+            # Train the model using only the training window
+            model.fit(X_train, y_train)
 
         return model
 
@@ -401,19 +603,21 @@ class MLPredictorStrategy(BaseStrategy):
 
         df = df.copy()
 
-        # get the indeces (dates) between the configured start and end prediction dates
+        # get the indices (dates) between the configured start and end prediction dates
         prediction_date_range = df.loc[self.start_date:self.end_date].index
         # count how many dates are in that prediction window
         total_dates = len(prediction_date_range)
         # initialize empty Series with all date indices to store predictions
         predictions = pd.Series(index=prediction_date_range, dtype=float, name="prediction")
 
+        # start timer to report how long all predictions take
         predict_start_time = time.time()
         last_elapsed = 0.0
 
         # walk forward through each date, train on training_years past data, and predict the signal for that date
         for i, prediction_date in enumerate(prediction_date_range):
             
+            # start timer to report how long each predictions takes
             start_time = time.time()
 
             # print progress and time taken if verbose=true
@@ -480,109 +684,14 @@ class MLPredictorStrategy(BaseStrategy):
 
 
         return predictions.fillna(value=0)
-
-
-    def predict_mulitcore(self, df: pd.DataFrame, show_progress: bool = True) -> pd.Series:
-        
-        '''
-        Simulates the “real trading” process: on each date, train using only past data, 
-        predict today's signal, then move forward one day.
-        '''
-
-        # ================================================================
-        # Predict the signal for prediction_date
-        # ================================================================
-
-        df = df.copy()
-
-        # get the indeces (dates) between the configured start and end prediction dates
-        prediction_date_range = df.loc[self.start_date:self.end_date].index
-        # count how many dates are in that prediction window
-        total_dates = len(prediction_date_range)
-        # initialize empty Series with all date indices to store predictions
-        predictions = pd.Series(index=prediction_date_range, dtype=float, name="prediction")
-
-        predict_start_time = time.time()
-        last_elapsed = 0.0
-
-        # walk forward through each date, train on training_years past data, and predict the signal for that date
-        for i, prediction_date in enumerate(prediction_date_range):
-            
-            start_time = time.time()
-
-            # print progress and time taken if verbose=true
-            if show_progress or self.verbose:
-                elapsed_time = time.time() - predict_start_time
-                if elapsed_time > 60:
-                    elapsed_time_str = f"{int(elapsed_time//60)}m {elapsed_time%60:.1f}s"
-                else:
-                    elapsed_time_str = f"{elapsed_time:.1f}s"
-
-                print(
-                    f"\r🧠 Predicting {prediction_date.date()} | ",
-                    f"{i + 1}/{total_dates} | ",
-                    f"last: {last_elapsed:.2f}s | ",
-                    f"elapsed: {elapsed_time_str}",
-                    end="",
-                    flush=True,
-                )
-
-            # define beginning of training window
-            train_start = prediction_date - pd.DateOffset(years=self.training_years)
-
-            # Skip this date if train_start is earlier than first date in dataset.
-            if train_start < df.index[0]:
-                continue
-
-            # Train MLP with past data up to day i-2 (yesterday (i-1) would not have a signal),
-            # to then predict signal for today (i) which will execute tomorrow at the open (with price Open_t+1).
-            train_end = df.index[df.index.get_loc(prediction_date) - 2]
-
-            # Take only the training range of data
-            train_df = df.loc[train_start:train_end]
-
-            # Prepare training dataset, split into features and target
-            X_train, y_train = self.feature_target_split_dataset(train_df)
-
-            # n_features cannot exceed number of available columns
-            if self.n_features > X_train.shape[1]:
-                raise ValueError(
-                    f"n_features ({self.n_features}) cannot be larger than "
-                    f"the number of available features ({X_train.shape[1]})."
-                )
-            
-            # Extract only the features from the row we want to predict.
-            X_predict, _ = self.feature_target_split_dataset(df.loc[[prediction_date]])
-
-
-            # Train and fit the MLP model using specific training dataset for this date.
-            model = self.train_and_fit(X_train, y_train)
-
-            # Use the trained model to predict the signal for prediction_date.
-            predictions.loc[prediction_date] = model.predict(X_predict)[0]
-
-            last_elapsed = time.time() - start_time
-
-
-        # print progress and time taken if verbose=true
-        if show_progress or self.verbose:
-            time_predict = time.time() - predict_start_time
-            if time_predict > 60:
-                print(f"\n✅ Prediction complete. Took {int(time_predict//60)}m {time_predict%60:.1f}s\n")
-            else:
-                print(f"\n✅ Prediction complete. Took {time_predict:.1f}s\n")
-
-
-        return predictions.fillna(value=0)
-
 
 
 
     def predict_debug(self, df: pd.DataFrame, show_progress: bool = True) -> pd.Series:
         
         '''
-        Simulates the “real trading” process: on each date, train using only past data, 
-        predict today's signal, then move forward one day.
+        This function prints and displays many things along the prediction process to be able to
+        debug what is wrong with the prediction process.
         '''
 
         # ================================================================
@@ -591,7 +700,7 @@ class MLPredictorStrategy(BaseStrategy):
 
         df = df.copy()
 
-        # get the indeces (dates) between the configured start and end prediction dates
+        # get the indices (dates) between the configured start and end prediction dates
         prediction_date_range = df.loc[self.start_date:self.end_date].index
         # count how many dates are in that prediction window
         total_dates = len(prediction_date_range)
@@ -678,11 +787,11 @@ class MLPredictorStrategy(BaseStrategy):
 
     def generate_signals(self, df: pd.DataFrame = None, show_progress: bool = True) -> pd.DataFrame:
         
-        # If no pre-prepared dataset is provided, prepare it first (download, assign signal, compute indicators, clean).
+        # If no pre-prepared dataset is provided, prepare it first (down/load, assign signal, compute indicators, clean).
         if df is None:
             df = self.prepare_dataset()
         
-        # Predict signals for each day sequentially, retrinaing and refitting the model for each day.
+        # Predict signals for each day sequentially, retraining and refitting the model for each day.
         predictions = self.predict(df, show_progress=show_progress)
 
         # Convert predictions to target weights by multiplying by position size.
@@ -697,13 +806,15 @@ class MLPredictorStrategy(BaseStrategy):
 
 
     """
-    Below is an attempt to make two functions: one that predicts the next day, 
-    and one that walks forward through the dataset to predict each day. 
-    The former is useful for real-time prediction, while the latter is useful 
-    for backtesting and evaluating the strategy on historical data.
+    The following are versions of the previous functions: one that only predicts the next day, 
+    one that walks forward through the dataset to predict each day, and one that generates the signals. 
+    These are useful for real-time prediction, for backtesting and evaluating the strategy on 
+    historical data an event-event basis.
     """
 
-    def predict_new(self, df: pd.DataFrame, prediction_date: pd.Timestamp) -> int | float:
+
+
+    def predict_single_event(self, df: pd.DataFrame, prediction_date: pd.Timestamp) -> int | float:
         
         '''
         Simulates the “real trading” process: on each date, train using only past data, 
@@ -714,16 +825,18 @@ class MLPredictorStrategy(BaseStrategy):
         # Predict the signal for prediction_date
         # ================================================================
 
-        # df = self.prepare_dataset().copy()
         df = df.copy()
 
         # define beginning of training window
         train_start = prediction_date - pd.DateOffset(years=self.training_years)
 
-        # Train MLP with past data up to yesterday (i-1), to then predict signal for today (i)
-        # which will execute tomorrow at the open (with price Open_t+1).
-        i = df.index.get_loc(prediction_date)
-        train_end = df.index[i - 1]
+        # Skip this date if train_start is earlier than first date in dataset.
+        if train_start < df.index[0]:
+            return 0
+
+        # Train MLP with past data up to day i-2 (yesterday (i-1) would not have a signal),
+        # to then predict signal for today (i) which will execute tomorrow at the open (with price Open_t+1).
+        train_end = df.index[df.index.get_loc(prediction_date) - 2]
 
         # Take only the training range of data
         train_df = df.loc[train_start:train_end]
@@ -731,8 +844,16 @@ class MLPredictorStrategy(BaseStrategy):
         # Prepare training dataset, split into features and target
         X_train, y_train = self.feature_target_split_dataset(train_df)
 
-        # Extract only the row we want to predict.
-        X_predict = df.loc[[prediction_date]]
+        # n_features cannot exceed number of available columns
+        if self.n_features > X_train.shape[1]:
+            raise ValueError(
+                f"n_features ({self.n_features}) cannot be larger than "
+                f"the number of available features ({X_train.shape[1]})."
+            )
+        
+        # Extract only the features from the row we want to predict.
+        X_predict, _ = self.feature_target_split_dataset(df.loc[[prediction_date]])
+
 
         # Train and fit the MLP model using specific training dataset for this date.
         model = self.train_and_fit(X_train, y_train)
@@ -740,28 +861,53 @@ class MLPredictorStrategy(BaseStrategy):
         # Use the trained model to predict the signal for prediction_date.
         prediction = model.predict(X_predict)[0]
 
+
         return prediction
+    
 
 
-
-    def walk_forward_predictions(self, df: pd.DataFrame) -> pd.Series:
+    def walk_forward_predictions(self, df: pd.DataFrame, show_progress: bool = True) -> pd.Series:
 
 
         # ================================================================
         # Predict the signal for prediction_date
         # ================================================================
 
-        # df = self.prepare_dataset().copy()
         df = df.copy()
 
+        # get the indices (dates) between the configured start and end prediction dates
+        prediction_date_range = df.loc[self.start_date:self.end_date].index
+        # count how many dates are in that prediction window
+        total_dates = len(prediction_date_range)
         # initialize empty Series with all date indices to store predictions
-        predictions = pd.Series(index=df.index, dtype=float, name="prediction")
+        predictions = pd.Series(index=prediction_date_range, dtype=float, name="prediction")
+
+        # start timer to report how long all predictions take
+        predict_start_time = time.time()
+        last_elapsed = 0.0
 
         # walk forward through each date, train on training_years past data, and predict the signal for that date
-        for i in range( len(df) ): 
+        for i, prediction_date in enumerate(prediction_date_range):
+            
+            # start timer to report how long each predictions takes
+            start_time = time.time()
 
-            # take the date at row i
-            prediction_date = df.index[i]
+            # print progress and time taken if verbose=true
+            if show_progress or self.verbose:
+                elapsed_time = time.time() - predict_start_time
+                if elapsed_time > 60:
+                    elapsed_time_str = f"{int(elapsed_time//60)}m {elapsed_time%60:.1f}s"
+                else:
+                    elapsed_time_str = f"{elapsed_time:.1f}s"
+
+                print(
+                    f"\r🧠 Predicting {prediction_date.date()} | ",
+                    f"{i + 1}/{total_dates} | ",
+                    f"last: {last_elapsed:.2f}s | ",
+                    f"elapsed: {elapsed_time_str}",
+                    end="",
+                    flush=True,
+                )
 
             # define beginning of training window
             train_start = prediction_date - pd.DateOffset(years=self.training_years)
@@ -771,24 +917,35 @@ class MLPredictorStrategy(BaseStrategy):
                 continue
             
             # Use the trained model to predict the signal for prediction_date.
-            prediction = self.predict_new(df, prediction_date)
+            prediction = self.predict_single_event(df, prediction_date)
 
             # Update the predictions Series with the predicted signal for this date.
             predictions.loc[prediction_date] = prediction
+
+            last_elapsed = time.time() - start_time
+
+
+        # print progress and time taken if verbose=true
+        if show_progress or self.verbose:
+            time_predict = time.time() - predict_start_time
+            if time_predict > 60:
+                print(f"\n✅ Prediction complete. Took {int(time_predict//60)}m {time_predict%60:.1f}s\n")
+            else:
+                print(f"\n✅ Prediction complete. Took {time_predict:.1f}s\n")
+
 
         return predictions.fillna(value=0)
 
 
 
-
-    def generate_signals_new(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
+    def generate_signals_event(self, df: pd.DataFrame = None, show_progress: bool = True) -> pd.DataFrame:
         
         # If no pre-prepared dataset is provided, prepare it first (download, assign signal, compute indicators, clean).
         if df is None:
             df = self.prepare_dataset()
         
-        # Predict signals for each day sequentially, retrinaing and refitting the model for each day.
-        predictions = self.walk_forward_predictions(df)
+        # Predict signals for each day sequentially, retraining and refitting the model for each day.
+        predictions = self.walk_forward_predictions(df, show_progress=show_progress)
 
         # Convert predictions to target weights by multiplying by position size.
         weights = pd.DataFrame(index=predictions.index)
