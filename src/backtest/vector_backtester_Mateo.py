@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from quantstats.stats import sharpe, sortino
 from src.config.config import ROOT_DIR  
 from src.portfolio.fees import IBKRFeeModel
 
@@ -106,28 +107,42 @@ class PortfolioVectorEngine:
         drawdown = (df['net_equity'] / roll_max) - 1.0
         max_dd = drawdown.min() * 100
         
-        # Win Rate metric
-        win_rate = (df['gross_returns'] > 0).mean() * 100
-        bm_returns = df['cum_benchmark'].pct_change(fill_method=None).fillna(0)
+        # Win Rate metric–– 'gross_returns' is used to avoid returns being negative due to position-entry fees when they should have been exactly 0 (ie no position).
+        gross_bar_returns = df['gross_returns'].iloc[1:]      # skip the 0-th row since there is no weight/position yet
+        win_rate = (gross_bar_returns > 0).mean() * 100
+        bm_returns = df['cum_benchmark'].pct_change(fill_method=None).fillna(0).iloc[1:]
         bm_win_rate = (bm_returns > 0).mean() * 100
-        # Note: the mean counts the 0-th element as a bar, but the first bar is always 0% return, so the win rate is slightly underestimated.
+        # Note: the first bar is always 0% return because the first weight is reaped in the second bar, so the win rate is slightly underestimated (and so is the loss rate).
 
         # Loss Rate metric –– 'gross_returns' is used to avoid returns being negative due to position-entry fees when they should have been exactly 0 (ie no position).
-        loss_rate = (df['gross_returns'] < 0).mean() * 100
+        loss_rate = (gross_bar_returns < 0).mean() * 100
         bm_loss_rate = (bm_returns < 0).mean() * 100
         # Note: the loss rate is similarly underestimated too. 
         # Also, the loss rate is not simply (1 - win_rate) since there could be bars with exactly 0% return.
+        # Zero Rate metric
+        zero_rate = (gross_bar_returns == 0).mean() * 100
+        bm_zero_rate = (bm_returns == 0).mean() * 100
+
+
+        # QuantStats risk-adjusted metrics, using the same bar-level return series as win/loss rates.
+        strategy_sharpe = sharpe(df['net_returns'])
+        bm_sharpe = sharpe(bm_returns)
+        strategy_adjusted_sortino = sortino(df['net_returns']) / np.sqrt(2)
+        bm_adjusted_sortino = sortino(bm_returns) / np.sqrt(2)
 
         # Total Fees Paid (Cumulative Costs)
         total_costs = df['cumulative_costs'].iloc[-1]
         
         print(f"\n📊 --- QUICK PORTFOLIO RESULTS: {title} ---")
-        print(f"   Frictionless Return: {gross_ret:,.2f}%")
-        print(f"   Net Strategy Return: {net_ret:,.2f}% (EW Benchmark: {bm_ret:,.2f}%)")
-        print(f"   Max Drawdown:        {max_dd:,.2f}%")
-        print(f"   Win Rate (Gross Bars):     {win_rate:.1f}% (EW Benchmark (Bars): {bm_win_rate:.1f}%)")
-        print(f"   Loss Rate (Gross Bars):    {loss_rate:.1f}% (EW Benchmark (Bars): {bm_loss_rate:.1f}%)")
-        print(f"   Total Fees Paid:     ${total_costs:,.2f}")
+        print(f"   Frictionless Return:     {gross_ret:,.2f}%")
+        print(f"   Net Strategy Return:     {net_ret:,.2f}%  (EW Benchmark: {bm_ret:,.2f}%)")
+        print(f"   Max Drawdown:            {max_dd:,.2f}%")
+        print(f"   Win Rate (Gross Bars):   {win_rate:.1f}%   (EW Benchmark: {bm_win_rate:.1f}%)")
+        print(f"   Loss Rate (Gross Bars):  {loss_rate:.1f}%   (EW Benchmark: {bm_loss_rate:.1f}%)")
+        print(f"   Zero Rate (Gross Bars):  {zero_rate:.1f}%    (EW Benchmark: {bm_zero_rate:.1f}%)")
+        print(f"   Sharpe Ratio (Net):      {strategy_sharpe:.2f}    (EW Benchmark: {bm_sharpe:.2f})")
+        print(f"   Adjusted Sortino (Net):  {strategy_adjusted_sortino:.2f}    (EW Benchmark: {bm_adjusted_sortino:.2f})")
+        print(f"   Total Fees Paid:         ${total_costs:,.2f}")
         print("-" * 45)
 
         # --- 2. QUANTSTATS HTML REPORT ---
