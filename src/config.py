@@ -48,7 +48,7 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb
 # --- STRATEGY SETTINGS ---
 STRATEGY_CLASS = "KalmanPairsStrategy"
 
-# --- STRATEGY PARAMETERS (Issue 12) ---
+# --- STRATEGY PARAMETERS ---
 # Previously {} — which silently fell back to the strategy's in-code defaults
 # and could drift from whatever the backtester was run with. These are pinned
 # explicitly so the live engine and the backtester read from one source of
@@ -69,7 +69,7 @@ STRATEGY_PARAMS = {
     "vt": 1e-3,                         # Observation noise variance
 
     # Execution sizing
-    "base_qty": 1000,                   # Base unit for the Y leg
+    "base_qty": 100,                    # Base unit for the Y leg
     "min_order_qty": 1,                 # Issue 11: reject entry if either leg < this
     "hedge_drift_threshold_pct": 20.0,  # Boot-time hedge-ratio drift warning
 }
