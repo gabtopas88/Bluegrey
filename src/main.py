@@ -53,7 +53,7 @@ class TradingEngine:
             strategy_name=self.strategy.__class__.__name__,
             session_context={
                 'risk_mode':         self.risk.mode,
-                'market_data_type':  getattr(config, 'IB_MARKET_DATA_TYPE', 3),
+                'market_data_type':  getattr(config, 'IB_MARKET_DATA_TYPE', 1),
             },
         )
 
