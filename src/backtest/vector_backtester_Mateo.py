@@ -141,7 +141,7 @@ class PortfolioVectorEngine:
         print(f"   Loss Rate (Gross Bars):  {loss_rate:.1f}%   (EW Benchmark: {bm_loss_rate:.1f}%)")
         print(f"   Zero Rate (Gross Bars):  {zero_rate:.1f}%    (EW Benchmark: {bm_zero_rate:.1f}%)")
         print(f"   Sharpe Ratio (Net):      {strategy_sharpe:.2f}    (EW Benchmark: {bm_sharpe:.2f})")
-        print(f"   Adjusted Sortino (Net):  {strategy_adjusted_sortino:.2f}    (EW Benchmark: {bm_adjusted_sortino:.2f})")
+        print(f"   Sortino/√2 (Net):        {strategy_adjusted_sortino:.2f}    (EW Benchmark: {bm_adjusted_sortino:.2f})")
         print(f"   Total Fees Paid:         ${total_costs:,.2f}")
         print("-" * 45)
 
