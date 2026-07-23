@@ -28,7 +28,7 @@ class DataManager:
     Responsibilities:
     1. Ingest raw ticks from IBKR.
     2. Aggregate ticks into 1-minute OHLC bars (for the Strategy).
-    3. Detect Data Gaps (The 'Heartbeat').
+    3. Detect Data Gaps (The 'Heartbeat') — PER-LEG, not just globally.
     """
     def __init__(self, ib_instance, instruments_dict):
         self.ib = ib_instance
@@ -47,7 +47,10 @@ class DataManager:
         # DataFrame Index: Instrument Keys, Columns: open, high, low, close, volume, time
         self.latest_bars = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'time'])
         
-        # Global Heartbeat (Tracks the very last time we heard from *any* asset)
+        # Global Heartbeat (Tracks the very last time we heard from *any* asset).
+        # Retained as an informational baseline; authoritative gap detection is
+        # now per-leg so a single chatty leg can't mask another
+        # leg going silent.
         self.system_last_time = None
         self.current_minute = None
 
@@ -85,17 +88,8 @@ class DataManager:
                 continue
             if not batch_latest_time or tick_time > batch_latest_time:
                 batch_latest_time = tick_time
-                
-            # 1. GAP DETECTION (Heartbeat)
-            # We check if this new tick is significantly later than the last system activity
-            if self.system_last_time:
-                delta = tick_time - self.system_last_time
-                if delta > GAP_THRESHOLD:
-                    logger.warning(f"⚠️ DATA GAP DETECTED: {delta} elapsed since last tick.")
-                    event.gap_detected = True
-                    event.gap_duration = delta
-                    # We accept the new time as the new baseline
-                    
+
+            # Update per-leg + global heartbeat state.
             self.system_last_time = tick_time
             self.last_times[key] = tick_time
             self.last_prices[key] = price
@@ -103,7 +97,29 @@ class DataManager:
 
             # Update the pending bar for this specific asset
             self._update_pending_bar(key, price, tick_time)
-        
+
+        # --- GAP DETECTION (PER-LEG HEARTBEAT) ---
+        # Issue fix: previously a single system_last_time was advanced by ANY
+        # ticking asset, so one leg could go silent indefinitely while another
+        # kept ticking and no gap was ever declared. We now measure each leg's
+        # staleness against the most recent observed market time (batch_latest_time)
+        # and declare a gap if ANY leg has not updated within the threshold.
+        # Legs that have never ticked (NaT) are skipped — that's un-warmed, not a gap.
+        if batch_latest_time is not None:
+            for key in self.instruments.keys():
+                last_t = self.last_times.get(key)
+                if last_t is None or pd.isna(last_t):
+                    continue
+                delta = batch_latest_time - last_t
+                if delta > GAP_THRESHOLD:
+                    logger.warning(
+                        f"⚠️ PER-LEG DATA GAP: '{key}' stale by {delta} "
+                        f"(threshold {GAP_THRESHOLD})."
+                    )
+                    event.gap_detected = True
+                    if delta > event.gap_duration:
+                        event.gap_duration = delta
+
         # --- THE SYSTEM CLOCK ---
         # Guarantees the strategy never receives misaligned timestamps
         if batch_latest_time:
@@ -137,14 +153,31 @@ class DataManager:
 
     def _finalize_all_bars(self):
         """
-        FIX: Sweeps all pending bars across ALL assets simultaneously 
-        and commits them to the latest_bars dataframe.
+        Sweeps all pending bars across ALL assets simultaneously and commits them
+        to the latest_bars dataframe.
+
+        Issue fix: an asset that received NO ticks this minute has a None
+        pending bar. Previously it was simply skipped, so latest_bars silently
+        retained the PRIOR minute's row for that asset — a pairs strategy could
+        then compute a spread from one fresh leg and one stale leg. We now write
+        an explicit NaN row (stamped with the finalized minute) for any leg that
+        produced no bar, so downstream consumers see an incomplete cross-section
+        and reject it (KalmanPairsStrategy.on_bar returns INVALID_PRICE on NaN)
+        rather than trading on stale data.
         """
+        finalized_minute = self.current_minute
         for key, bar_dict in self.pending_bars.items():
             if bar_dict is not None:
                 self.latest_bars.loc[key] = [
                     bar_dict['open'], bar_dict['high'], bar_dict['low'], 
                     bar_dict['close'], bar_dict['volume'], bar_dict['start_time']
+                ]
+            else:
+                # No ticks this minute for this asset → explicit missing marker.
+                # NaN OHLC forces the strategy to reject the incomplete cross-section;
+                # the stamped time keeps the row aligned to the finalized minute.
+                self.latest_bars.loc[key] = [
+                    np.nan, np.nan, np.nan, np.nan, 0, finalized_minute
                 ]
         # Reset pending bars for the next minute
         for key in self.pending_bars.keys():

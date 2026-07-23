@@ -2,7 +2,7 @@ import pandas as pd
 import arcticdb as adb
 import logging
 from typing import List, Dict, Union
-from src.config.config import ARCTIC_PATH
+from src.config import ARCTIC_PATH
 
 logger = logging.getLogger(__name__)
 

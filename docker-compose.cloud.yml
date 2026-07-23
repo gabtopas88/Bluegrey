@@ -1,0 +1,85 @@
+# docker-compose.cloud.yml
+#
+# SELF-CONTAINED PAPER-TRADING STACK for the headless Azure VM (branch: main).
+# Runs a containerized IB Gateway AND the Bluegrey engine, wired together over
+# Docker's internal network. Nothing needs to run on the host except Docker.
+#
+#   Launch:  docker compose -f docker-compose.cloud.yml up -d --build
+#   Logs:    docker compose -f docker-compose.cloud.yml logs -f
+#   Stop:    docker compose -f docker-compose.cloud.yml down
+
+version: '3.8'
+
+services:
+  # ============================================================
+  # 0. IB GATEWAY — Interactive Brokers connectivity (headless)
+  # ============================================================
+  # Prebuilt IB Gateway + IBC that logs in automatically from .env. The real API
+  # listens on 4001(live)/4002(paper) bound to 127.0.0.1 INSIDE the container; a
+  # socat relay re-publishes them on 0.0.0.0:4003/4004 so OTHER containers can
+  # reach them. The engine therefore connects to ib-gateway:4004 (paper).
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: bluegrey_ib_gateway
+    restart: unless-stopped                          # Recover after a crash or VM reboot
+    environment:
+      - TWS_USERID=${TWS_USERID}                     # Your IBKR PAPER username (from .env)
+      - TWS_PASSWORD=${TWS_PASSWORD}                 # Your IBKR PAPER password (from .env)
+      - TRADING_MODE=${TRADING_MODE:-paper}          # SAFETY GATE: only ever logs into a paper account
+      - READ_ONLY_API=${READ_ONLY_API:-no}           # 'no' = allow the engine to place (paper) orders
+      - VNC_SERVER_PASSWORD=${VNC_SERVER_PASSWORD:-} # Optional: VNC into the GUI to debug login/2FA
+      - TWOFA_TIMEOUT_ACTION=${TWOFA_TIMEOUT_ACTION:-exit} # If 2FA ever hangs, exit so restart retries
+      - TIME_ZONE=${TIME_ZONE:-Etc/UTC}
+    # Readiness gate: the paper API (socat 4004) only opens AFTER login finishes.
+    # The engine waits on this so it never races a half-booted gateway.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/4004' 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s                              # Grace window for first login before failures count
+
+  # ============================================================
+  # 1. LIVE ENGINE — the Bluegrey trading process (headless)
+  # ============================================================
+  live_engine:
+    build:
+      context: .                                     # Build from the repo root...
+      dockerfile: Dockerfile                         # ...using the root Dockerfile
+    container_name: bluegrey_production
+    restart: unless-stopped                          # CRITICAL: auto-restart if the app crashes
+    depends_on:
+      ib-gateway:
+        condition: service_healthy                   # Don't start until the gateway is logged in & API-ready
+    volumes:
+      # Two-way code sync: edit on the VM and the container sees it (no rebuild for src changes)
+      - ./src:/app/src
+      - ./research:/app/research
+      - ./strategies:/app/strategies
+      - ./tools:/app/tools
+      - ./universes:/app/universes
+      # Persist telemetry / DB to the VM disk so it survives `down`
+      - ./data:/app/data
+    environment:
+      - ENV=PRODUCTION
+      # Reach the gateway by service name over the compose network.
+      # Paper API = 4004 (socat relay). NOT 4002 (that's container-localhost only).
+      - IB_HOST=ib-gateway
+      - IB_PORT=4004
+      - IB_CLIENT_ID=202                             # Any unique integer; must not clash with another client
+      # Market data: 1=LIVE (you confirmed FX entitlement), 3=DELAYED fallback.
+      - IB_MARKET_DATA_TYPE=${IB_MARKET_DATA_TYPE:-1}
+      # Risk mode: ENFORCE = risk manager blocks/resizes orders; SHADOW = log-only diagnostic.
+      - RISK_MODE=${RISK_MODE:-ENFORCE}
+      - POLYGON_API_KEY=${POLYGON_API_KEY:-}         # Optional; live warmup uses IBKR, not Polygon
+    # Override the image's default (Jupyter) with the headless engine entrypoint
+    command: ["python", "-m", "src.main"]
+
+  # ============================================================
+  # 2. METRICS & MONITORING (placeholder — not yet implemented)
+  # ============================================================
+  # In a live fund you never rely on console prints; you stream telemetry to a
+  # dashboard. Future services belong here, e.g.:
+  #   prometheus:  scrapes engine metrics over an exposed /metrics endpoint
+  #   grafana:     dashboards + alerting on Sharpe / PnL / drawdown / heartbeat
+  # Left commented until the telemetry endpoint is exposed by the engine.

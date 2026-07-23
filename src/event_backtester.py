@@ -2,9 +2,10 @@ import os
 import logging
 from datetime import timedelta
 import pandas as pd
-from src.data.store import DataStore
-from src.engine.risk import RiskManager
-from src.portfolio.fees import IBKRFeeModel
+from src import config
+from src.store import DataStore
+from src.risk import RiskManager
+from src.fees import IBKRFeeModel
 
 # Minimal Logging for Backtest (Clean Output)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -137,14 +138,27 @@ class BacktestEngine:
     The Time Machine.
     Simulates the Live Engine's Event Loop over historical data.
     """
-    def __init__(self, strategy_class, instruments, params, data_library: str, start_cap=100000):
+    def __init__(self, strategy_class, instruments, params, data_library: str, start_cap=100000,
+                 risk_mode: str = None):
         self.store = DataStore(library_name=data_library) 
         self.instruments = instruments
         self.params = params
         
         self.strategy = strategy_class(instruments, params)
         self.broker = VirtualBroker(start_cap)
-        self.risk = RiskManager()
+        # RiskManager needs the universe so its symbol whitelist resolves
+        # against contract.localSymbol — mirrors the live engine wiring.
+        #
+        # risk_mode mirrors the live engine's enforcement mode so a no-risk
+        # paper run can be matched by a no-risk backtest (parity). If not passed
+        # explicitly (notebook control), it falls back to config.RISK_MODE so
+        # setting RISK_MODE=shadow in the environment toggles BOTH engines
+        # symmetrically. ENFORCE is the safe default.
+        resolved_risk_mode = (
+            risk_mode if risk_mode is not None
+            else getattr(config, 'RISK_MODE', RiskManager.MODE_ENFORCE)
+        )
+        self.risk = RiskManager(instruments=instruments, mode=resolved_risk_mode)
         
         self.risk.max_orders_per_minute = float('inf') 
         
@@ -224,8 +238,25 @@ class BacktestEngine:
                         start_of_day_equity=self.broker.initial_capital 
                     )
                     
+                    # Pending-transition protocol: mirror the live engine.
+                    # On Risk approval, commit the strategy's staged state
+                    # transition and queue the orders for next-bar execution.
+                    # On rejection, roll back the staged transition so the
+                    # strategy doesn't drift into a state it never reached.
+                    #
+                    # Issue 6: Risk may resize orders in place, so commit from the
+                    # POST-Risk signal — identical to the live engine — so held_qty_*
+                    # reflects approved sizes and the two paths stay in parity.
+                    #
+                    # Mode-agnostic, exactly like the live engine: in SHADOW mode
+                    # check() only logs and returns True with orders untouched, so
+                    # the matched no-risk backtest stays in parity with a no-risk
+                    # paper run.
                     if self.risk.check(signal, current_time=timestamp.timestamp()):
+                        self.strategy.commit_pending_transition(signal)
                         pending_orders.extend(signal.orders)
+                    else:
+                        self.strategy.rollback_pending_transition()
 
             self.broker.mark_to_market(market_snapshot, timestamp)
 
@@ -269,7 +300,7 @@ class BacktestEngine:
             
             if returns.std() == 0:
                 print("⚠️ Returns volatility is zero (no active trades). Skipping Tearsheet.")
-                returnen 
+                return
             
             os.makedirs("research/Tearsheets", exist_ok=True) 
             report_path = "research/Tearsheets/event_backtest_tearsheet.html"

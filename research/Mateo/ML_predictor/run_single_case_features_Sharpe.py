@@ -9,7 +9,7 @@ from run_single_case import run_single_case
 '''
 
 from ML_predictor_features_Sharpe import MLPredictorStrategy
-from src.backtest.vector_backtester_Mateo import PortfolioVectorEngine
+from src.vector_backtester_Mateo import PortfolioVectorEngine
 
 def run_single_case_features_Sharpe(symbol,
                     asset_class = "STK",

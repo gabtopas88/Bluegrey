@@ -17,8 +17,8 @@ import seaborn as sns
 from IPython.display import display
 
 from ML_predictor import MLPredictorStrategy
-# from src.backtest.vector_backtester import PortfolioVectorEngine
-from src.backtest.vector_backtester_Mateo import PortfolioVectorEngine
+# from src.vector_backtester import PortfolioVectorEngine
+from src.vector_backtester_Mateo import PortfolioVectorEngine
 
 
 

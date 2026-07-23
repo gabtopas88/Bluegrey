@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from polygon import RESTClient
 
-from src.config import config
+import src.config as config
 
 logger = logging.getLogger("UniverseManager")
 

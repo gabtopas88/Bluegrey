@@ -45,7 +45,7 @@ from polygon import RESTClient
 from arcticdb import Arctic
 
 # Import the Unified Config
-import src.config.config as config
+from src import config
 
 # --- SETUP LOGGING ---
 logging.basicConfig(

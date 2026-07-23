@@ -51,8 +51,8 @@ ROOT_DIR = Path(__file__).parent.parent.resolve()
 sys.path.append(str(ROOT_DIR))
 
 # Import the Unified Config & The Universe Manager
-from src.config import config
-from src.data.universe import UniverseManager
+from src import config
+from src.universe import UniverseManager
 
 # --- SETUP LOGGING ---
 logging.basicConfig(

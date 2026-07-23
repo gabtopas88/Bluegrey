@@ -5,8 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from quantstats.stats import sharpe, sortino
-from src.config.config import ROOT_DIR  
-from src.portfolio.fees import IBKRFeeModel
+from src.config import ROOT_DIR
+from src.fees import IBKRFeeModel
 
 # Suppress pandas fragmentation warnings for clean notebook output
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
