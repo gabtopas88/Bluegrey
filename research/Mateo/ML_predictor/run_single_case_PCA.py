@@ -10,7 +10,7 @@ from run_single_case_PCA import run_single_case_PCA
 
 from ML_predictor_PCA import MLPredictorStrategy
 # from src.backtest.vector_backtester import PortfolioVectorEngine
-from backtest.vector_backtester_Mateo import PortfolioVectorEngine
+from src.backtest.vector_backtester_Mateo import PortfolioVectorEngine
 
 def run_single_case_PCA(symbol,
                     asset_class = "STK",
@@ -19,11 +19,11 @@ def run_single_case_PCA(symbol,
                     signal_threshold = 0.002,
                     pca_n_components = 0.95,
                     training_years = 10, 
+                    sharpe_filter_enabled = False,
                     rolling_sharpe_window = 63,
                     sharpe_enter_threshold = 1.05,
                     sharpe_exit_threshold = 0.95,
-                    sharpe_filter_enabled = False,
-                    rolling_sharpe_min_periods = 63,
+                    rolling_sharpe_min_periods = None,
                     rolling_sharpe_annualization = 252,
                     sharpe_performance_lag = 2,
                     feature_diagnostics_enabled = True,
@@ -45,11 +45,12 @@ def run_single_case_PCA(symbol,
         "signal_threshold": signal_threshold,
         "pca_n_components": pca_n_components,
         "training_years": training_years,
+        "sharpe_filter_enabled": sharpe_filter_enabled,
         "rolling_sharpe_window": rolling_sharpe_window,
         "sharpe_enter_threshold": sharpe_enter_threshold,
         "sharpe_exit_threshold": sharpe_exit_threshold,
-        "sharpe_filter_enabled": sharpe_filter_enabled,
-        "rolling_sharpe_min_periods": rolling_sharpe_min_periods,
+        "rolling_sharpe_min_periods": ( rolling_sharpe_window if rolling_sharpe_min_periods is None 
+                                       else rolling_sharpe_min_periods ),
         "rolling_sharpe_annualization": rolling_sharpe_annualization,
         "sharpe_performance_lag": sharpe_performance_lag,
         "feature_diagnostics_enabled": feature_diagnostics_enabled,

@@ -9,8 +9,7 @@ from run_single_case import run_single_case
 '''
 
 from ML_predictor_features_Sharpe import MLPredictorStrategy
-# from src.backtest.vector_backtester import PortfolioVectorEngine
-from backtest.vector_backtester_Mateo import PortfolioVectorEngine
+from src.backtest.vector_backtester_Mateo import PortfolioVectorEngine
 
 def run_single_case_features_Sharpe(symbol,
                     asset_class = "STK",
@@ -19,10 +18,10 @@ def run_single_case_features_Sharpe(symbol,
                     signal_threshold = 0.002,
                     n_features = 6,
                     training_years = 10, 
+                    sharpe_filter_enabled = False,
                     rolling_sharpe_window = 63,
                     sharpe_enter_threshold = 1.05,
                     sharpe_exit_threshold = 0.95,
-                    sharpe_filter_enabled = False,
                     rolling_sharpe_min_periods = 63,
                     rolling_sharpe_annualization = 252,
                     sharpe_performance_lag = 2,
