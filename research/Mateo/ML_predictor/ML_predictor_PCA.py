@@ -24,7 +24,12 @@ import pandas_ta_classic as ta
 
 # Machine learning
 from sklearn.neural_network import MLPClassifier
+# from sklearn.preprocessing import MinMaxScaler     # this was used for Pearson correlation, but not PCA
 from sklearn.preprocessing import StandardScaler
+# On StandardScaler vs MinMaxScaler: I used StandardScaler because PCA is variance-based. 
+# PCA finds directions of maximum variance, so features should usually be centered and scaled to comparable variance first. 
+# StandardScaler gives each feature mean 0 and standard deviation 1. MinMaxScaler puts features into a range, usually [0, 1],
+# but does not equalize variance and can be distorted by extreme min/max values.
 from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.decomposition import PCA
@@ -118,6 +123,10 @@ class MLPredictorStrategy(BaseStrategy):
         self.random_state = self.params.get("random_state", 42)
         self.max_iter = self.params.get("max_iter", 5000)
         self.verbose = self.params.get("verbose", True)
+        self.max_abs_feature_value = self.params.get("max_abs_feature_value", 1e100)
+
+        if self.max_abs_feature_value is not None and self.max_abs_feature_value <= 0:
+            raise ValueError("max_abs_feature_value must be positive or None.")
 
 
 
@@ -594,6 +603,25 @@ class MLPredictorStrategy(BaseStrategy):
 
         # Drop constant features
         df = df.drop(columns=global_constant_cols).copy()
+
+        # ==================================================
+        # Diagnose and remove numerically unsafe features
+        # ==================================================
+
+        # Some pandas-ta indicators such as EXP, SINH, and COSH can create finite but enormous
+        # values. StandardScaler estimates variance, so squaring those values can overflow and
+        # create NaNs before PCA. Drop only feature columns whose magnitude is unsafe.
+        if self.max_abs_feature_value is not None:
+            feature_cols = df.columns.drop("Signal", errors="ignore")
+            feature_abs_max = df[feature_cols].abs().max(axis=0)
+            unsafe_feature_cols = feature_abs_max[feature_abs_max > self.max_abs_feature_value].index.copy()
+
+            if self.verbose:
+                print(f"☑️ {len(unsafe_feature_cols)} numerically unsafe features exceed max_abs_feature_value={self.max_abs_feature_value:g}:")
+                print(unsafe_feature_cols.tolist())
+                print("➡️ They will be removed to prevent scaler/PCA overflow.")
+
+            df = df.drop(columns=unsafe_feature_cols).copy()
 
         # Visualise
         if self.verbose:
