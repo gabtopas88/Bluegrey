@@ -87,7 +87,7 @@ class YahooFinanceIngestor:
         if market not in SUPPORTED_MARKETS:
             raise ValueError(f"Unsupported market: {market}. Supported: {list(SUPPORTED_MARKETS)}")
 
-        self.output_dir = Path(output_dir) if output_dir else ROOT_DIR / "src" / "data" / "yahoo" / f"{self.market}" / f"{self.interval}"
+        self.output_dir = Path(output_dir) if output_dir else ROOT_DIR / "data" / "yahoo" / f"{self.market}" / f"{self.interval}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         yf.set_tz_cache_location(str(self.output_dir / ".yfinance_cache"))
 
@@ -322,7 +322,7 @@ def parse_args(command_line_args=None):
     parser.add_argument("--interval", default="1d", help="Yahoo interval, e.g. 1d, 1h, 15m.")
     parser.add_argument("--initial-date", default="1980-01-01")
     parser.add_argument("--final-date", default=str(date.today()))
-    parser.add_argument("--output-dir", default=None, help=f"Defaults to {ROOT_DIR}/src/data/yahoo/<market>/<interval>/")
+    parser.add_argument("--output-dir", default=None, help=f"Defaults to {ROOT_DIR}/data/yahoo/<market>/<interval>/")
     parser.add_argument("--ticker-file", default=None, help="Optional .txt/.csv/.yaml universe file.")
     parser.add_argument("--tickers", nargs="*", default=None, help="Optional explicit ticker list.")
     parser.add_argument("--auto-adjust", action="store_true", help="Use Yahoo adjusted OHLC prices.")

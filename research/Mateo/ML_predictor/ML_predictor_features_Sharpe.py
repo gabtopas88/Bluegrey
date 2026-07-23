@@ -236,7 +236,7 @@ class MLPredictorStrategy(BaseStrategy):
 
         # Locate the Yahoo data directory relative to the repo root
         repo_root = Path(__file__).resolve().parents[3]
-        yahoo_root = repo_root / "src" / "data" / "yahoo"
+        yahoo_root = repo_root / "data" / "yahoo"
 
         # Use regex to match the symbol to the filename: subsitute any 
         # non-letter-number-dot-underscore-hyphen with an underscore, and strip leading/trailing underscores
