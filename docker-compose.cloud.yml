@@ -8,8 +8,6 @@
 #   Logs:    docker compose -f docker-compose.cloud.yml logs -f
 #   Stop:    docker compose -f docker-compose.cloud.yml down
 
-version: '3.8'
-
 services:
   # ============================================================
   # 0. IB GATEWAY — Interactive Brokers connectivity (headless)
