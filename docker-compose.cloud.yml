@@ -74,7 +74,63 @@ services:
     command: ["python", "-m", "src.main"]
 
   # ============================================================
-  # 2. METRICS & MONITORING (placeholder — not yet implemented)
+  # 2. TELEMETRY DASHBOARD — read-only Streamlit monitor
+  # ============================================================
+  # Reads the engine's append-only Parquet telemetry and renders it as a web
+  # dashboard. It NEVER connects to IBKR and NEVER writes telemetry: the ./data
+  # mount is read-only (:ro) and the app imports only schema constants from
+  # src.telemetry — it does NOT instantiate TelemetryStore (whose __init__ would
+  # create dirs and write a session manifest). Safe to run alongside the engine;
+  # it cannot touch the single market-data session or affect strategy behaviour.
+  #
+  # Access is via SSH tunnel only:
+  #   ssh -L 8501:localhost:8501 <vm>   ->   http://localhost:8501
+  # The port is published on 127.0.0.1 of the VM (loopback), so nothing is
+  # exposed on the VM's public interface even if an Azure NSG rule is loose.
+  dashboard:
+    build:
+      context: .                                     # Reuse the SAME image as the engine...
+      dockerfile: Dockerfile                         # ...streamlit + plotly are already in pyproject.toml
+    container_name: bluegrey_dashboard
+    restart: unless-stopped                          # Keep the monitor up across crashes / VM reboots
+    # NOTE: intentionally NO depends_on the gateway/engine. The dashboard must
+    # start and show history even when the engine or gateway is down.
+    volumes:
+      # Read-only telemetry: the dashboard can never mutate the event log.
+      - ./data:/app/data:ro
+      # Dashboard code, live-editable on the VM (mirrors the engine's src sync).
+      - ./dashboard:/app/dashboard
+      # Schema single-source-of-truth (read-only): src.telemetry SCHEMAS/columns.
+      - ./src:/app/src:ro
+    environment:
+      # Make `from dashboard...` and `from src.telemetry...` importable at /app.
+      - PYTHONPATH=/app
+      # Where the telemetry tree lives inside the container (matches the :ro mount).
+      - TELEMETRY_DIR=/app/data/telemetry
+      # Display timezone for the "local" column alongside UTC. Engine logs UTC.
+      - APP_TZ=${APP_TZ:-Europe/Madrid}
+      # Entry/exit z reference lines drawn on the spread chart. Defaults mirror
+      # the KalmanPairsStrategy thresholds; override here if the strategy changes.
+      - DASH_ENTRY_Z=${DASH_ENTRY_Z:-2.0}
+      - DASH_EXIT_Z=${DASH_EXIT_Z:-0.0}
+      # UI auto-refresh cadence (seconds). Engine writes ~1-3 events/min, so
+      # 12s is ample without hammering the disk.
+      - DASH_REFRESH_SECONDS=${DASH_REFRESH_SECONDS:-12}
+    # Publish Streamlit on the VM loopback only (SSH-tunnel access; not public).
+    ports:
+      - "127.0.0.1:8501:8501"
+    # Override the image's default (Jupyter) with the Streamlit entrypoint.
+    command:
+      - streamlit
+      - run
+      - dashboard/app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+      - --browser.gatherUsageStats=false
+
+  # ============================================================
+  # 3. METRICS & MONITORING (placeholder — not yet implemented)
   # ============================================================
   # In a live fund you never rely on console prints; you stream telemetry to a
   # dashboard. Future services belong here, e.g.:
