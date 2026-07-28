@@ -27,6 +27,9 @@ arctic_db/
 research/Tearsheets/
 *.html
 repomix-output.xml
+research/Mateo/ML_predictor/test_Pearson_combined_strategy_outputs/
+research/Mateo/ML_predictor/test_PCA_scaler_comparison_outputs/
+research/Mateo/ML_predictor/test_probability_strategy_comparison_outputs/
 
 # --- IDE Settings ---
 .vscode/
