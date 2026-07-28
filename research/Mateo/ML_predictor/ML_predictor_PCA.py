@@ -24,7 +24,7 @@ import pandas_ta_classic as ta
 
 # Machine learning
 from sklearn.neural_network import MLPClassifier
-# from sklearn.preprocessing import MinMaxScaler     # this was used for Pearson correlation, but not PCA
+from sklearn.preprocessing import MinMaxScaler     # this was used for Pearson correlation, but not PCA
 from sklearn.preprocessing import StandardScaler
 # On StandardScaler vs MinMaxScaler: I used StandardScaler because PCA is variance-based. 
 # PCA finds directions of maximum variance, so features should usually be centered and scaled to comparable variance first. 
@@ -62,6 +62,9 @@ class MLPredictorStrategy(BaseStrategy):
         # int, e.g. 6: keep exactly 6 principal components
         # float, e.g. 0.95: keep however many components explain 95% of variance
         self.pca_n_components = self.params.get("pca_n_components", 0.95)
+        self.pca_scaler = self.params.get("pca_scaler", "standard")
+        if self.pca_scaler not in {"standard", "minmax"}:
+            raise ValueError("pca_scaler must be either 'standard' or 'minmax'.")
         self.position_size = self.params.get("position_size", 1.0)
 
         self.start_date = self.params.get("start_date", "2025-01-01")
@@ -671,9 +674,16 @@ class MLPredictorStrategy(BaseStrategy):
         # Build MLP pipeline with PCA dimensionality reduction and scaling
         # ===========================================================================
 
+        if self.pca_scaler == "standard":
+            scaler = StandardScaler()
+        elif self.pca_scaler == "minmax":
+            scaler = MinMaxScaler()
+        else:
+            raise ValueError("pca_scaler must be either 'standard' or 'minmax'.")
+
         pipeline = Pipeline([
             ("variance_filter", VarianceThreshold(threshold=0.0)),
-            ("scaler", StandardScaler()),
+            ("scaler", scaler),
             ("pca", PCA(n_components=self.pca_n_components, svd_solver="full")),
             ("mlp", MLPClassifier(random_state=self.random_state, max_iter=self.max_iter)),
         ])

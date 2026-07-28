@@ -18,6 +18,7 @@ def run_single_case_PCA(symbol,
                     end_date = "2026-01-01",
                     signal_threshold = 0.002,
                     pca_n_components = 0.95,
+                    pca_scaler = "standard",
                     training_years = 10, 
                     sharpe_filter_enabled = False,
                     rolling_sharpe_window = 63,
@@ -34,8 +35,10 @@ def run_single_case_PCA(symbol,
                     execution_delay = 1,
                     verbose = False,
                     show_progress = True,
+                    show_tearsheet = True,
                     return_params = False,
                     return_strategy = False,
+                    return_artifacts = False,
                     ):
     
     params = {
@@ -44,6 +47,7 @@ def run_single_case_PCA(symbol,
         "end_date": end_date,
         "signal_threshold": signal_threshold,
         "pca_n_components": pca_n_components,
+        "pca_scaler": pca_scaler,
         "training_years": training_years,
         "sharpe_filter_enabled": sharpe_filter_enabled,
         "rolling_sharpe_window": rolling_sharpe_window,
@@ -72,6 +76,8 @@ def run_single_case_PCA(symbol,
 
     # Stop if no weights were generated (i.e. the backtest would not run):
     if weights.empty:
+        if return_artifacts:
+            return { "params": {**params}, "strategy": strategy, "dataset": dataset, "weights": weights }
         if return_params and return_strategy:
             return {"params": {**params}, "strategy": strategy}
         if return_params:
@@ -93,13 +99,16 @@ def run_single_case_PCA(symbol,
     )
 
     # Run the backtest
-    engine_run.run()
+    stats = engine_run.run()
 
     # Generate a tearsheet
-    engine_run.tearsheet(f"{symbol} ML Walk Forward")
+    if show_tearsheet:
+        engine_run.tearsheet(f"{symbol} ML Walk Forward")
 
 
     # Return requested run objects for notebook inspection.
+    if return_artifacts:
+        return { "params": {**params}, "strategy": strategy, "dataset": dataset, "weights": weights, "prices": prices, "engine": engine_run, "stats": stats }
     if return_params and return_strategy:
         return {"params": {**params}, "strategy": strategy}
     if return_params:
