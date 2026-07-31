@@ -24,36 +24,28 @@ import pandas_ta_classic as ta
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.pipeline import Pipeline
-from sklearn.feature_selection import SelectKBest, VarianceThreshold
 
 # Silence convergence warnings from MLPClassifier when max_iter is too low to converge
 import warnings
 from sklearn.exceptions import ConvergenceWarning
 
-# Feature analysis
-from scipy.stats import pearsonr
-
 # Inherit BaseStrategy
 from strategies.base import BaseStrategy
 
 
-# ==================================================
-# Pearson-correlation feature scoring function
-# ==================================================
-
-def pearson_score(X: np.ndarray, y: np.ndarray) -> tuple[ np.ndarray, np.ndarray ]:
-
-    # Compute absolute Pearson correlation for each feature
-    scores = np.array([
-        abs(pearsonr(X[:, i], y)[0])    # Use abs() since feature selection should rank by strength, not sign.
-        for i in range(X.shape[1])
-    ])
-
-    # Replace NaNs (e.g. constant features) with 0
-    scores = np.nan_to_num(scores, nan=0.0)
-
-    # sklearn expects (scores, pvalues) -- return dummy p-values because SelectKBest expects two arrays.
-    return scores, np.zeros_like(scores)
+# Technical indicators selected for ECH in Table 5 of the paper.
+ECH_TECHNICAL_INDICATORS = (
+    "AOBV_LR_2",
+    "BBP_5_2.0",
+    "BOP",
+    "CTI_12",
+    "DEC_1",
+    "EBSW_40_10",
+    "INC_1",
+    "J_9_3",
+    "K_9_3",
+    "ZS_30",
+)
 
 
 
@@ -73,7 +65,6 @@ class MLPredictorStrategy(BaseStrategy):
             raise ValueError("Missing required strategy parameter: symbol") from exc
         
         self.signal_threshold = self.params.get("signal_threshold", 0.002)  # delimiter of '0' signal from above and below – log-return units
-        self.n_features = self.params.get("n_features", 6)
         self.position_size = self.params.get("position_size", 1.0)
 
         self.start_date = self.params.get("start_date", "2025-01-01")
@@ -331,58 +322,52 @@ class MLPredictorStrategy(BaseStrategy):
     def compute_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
 
         # =============================================================================================
-        # Compute all technical indicators with Pandas-TA (and TA-Lib internally if installed)
+        # Compute the ECH technical indicators selected in Table 5 of the paper
         # =============================================================================================
 
         if self.verbose:
-            print("🧪 Computing technical indicators...")
+            print("🧪 Computing the 10 ECH technical indicators from Table 5...")
 
-        # Run "strategy" to compute and append all available technical indicators.
-        # Disable pandas-ta's inner multiprocessing when this strategy runs inside joblib/loky.
-        df.ta.cores = 0
-        df.ta.strategy(lookahead=False)
+        aobv = ta.aobv(
+            close=df["Close"],
+            volume=df["Volume"],
+            fast=4,
+            slow=12,
+            min_lookback=2,
+            max_lookback=2,
+            run_length=2,
+        )
+        bbands = ta.bbands(close=df["Close"], length=5, std=2.0)
+        kdj = ta.kdj(
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            length=9,
+            signal=3,
+        )
 
-        # Drop DPO created by df.ta.strategy(), because default DPO may be centered/lookahead-biased
-        df = df.drop(columns=["DPO_20"], errors="ignore")
+        indicators = pd.DataFrame(
+            {
+                "AOBV_LR_2": aobv["AOBV_LR_2"],
+                "BBP_5_2.0": bbands["BBP_5_2.0"],
+                "BOP": ta.bop(
+                    open_=df["Open"],
+                    high=df["High"],
+                    low=df["Low"],
+                    close=df["Close"],
+                ),
+                "CTI_12": ta.cti(close=df["Close"], length=12),
+                "DEC_1": ta.decreasing(close=df["Close"], length=1),
+                "EBSW_40_10": ta.ebsw(close=df["Close"], length=40, bars=10),
+                "INC_1": ta.increasing(close=df["Close"], length=1),
+                "J_9_3": kdj["J_9_3"],
+                "K_9_3": kdj["K_9_3"],
+                "ZS_30": ta.zscore(close=df["Close"], length=30),
+            },
+            index=df.index,
+        )
 
-        # Recompute DPO without lookahead/centering
-        df.ta.dpo(close="Close", length=20, lookahead=False, append=True)
-
-        # Drop all Ichimoku indicators, then recompute – ICS_26 looks 26 days ahead
-        df = df.drop(columns=["ISA_9", "ISB_26", "ITS_9", "IKS_26", "ICS_26"], errors="ignore")
-
-        # Recompute Ichimoku indicators wihtout lookahead (ie. without ICS_26)
-        df.ta.ichimoku(lookahead=False, append=True)
-
-        # Drop all TOS_STDEVALL indicators, then recompute for finite length
-        df = df.drop(columns=["TOS_STDEVALL_LR", "TOS_STDEVALL_L_1", "TOS_STDEVALL_U_1",
-                               "TOS_STDEVALL_L_2", "TOS_STDEVALL_U_2", "TOS_STDEVALL_L_3", 
-                               "TOS_STDEVALL_U_3"], errors="ignore")
-
-        # Recompute TOS_STDEVALL indicator for finite lengths
-        for length in [21, 63, 126, 252, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000]: 
-            if length < len(df):
-                # linear regression
-                lr = df.ta.linreg(close="Close", length=length, append=False)
-                # standard deviation
-                sd = df.ta.stdev(close="Close", length=length, append=False)
-
-                df[f"TOS_STDEVALL_{length}_LR"] = lr
-
-                for n in [1, 2, 3]:
-                    df[f"TOS_STDEVALL_{length}_L_{n}"] = lr - n * sd
-                    df[f"TOS_STDEVALL_{length}_U_{n}"] = lr + n * sd
-
-        # Include more increasing and decreasing pattern indicators (INC_n and DEC_n) for n=2 to 10 days back 
-        # (n=1 is already included by df.ta.strategy() )
-        # These track if the  Close price has been increasing or decreasing for n consecutive days, which may be useful for trend detection.
-        for n in range(2, 11):
-            df[f"INC_{n}"] = df.ta.increasing(close="Close", length=n, strict=True, asint=True, append=True)
-
-            df[f"DEC_{n}"] = df.ta.decreasing(close="Close", length=n, strict=True, asint=True, append=True)
-
-
-        return df
+        return df.join(indicators)
 
 
 
@@ -496,25 +481,11 @@ class MLPredictorStrategy(BaseStrategy):
             print(f"➡️ We have {rows_after_cleaning} rows and {df.shape[1]} columns (features = OHLCV + indicators + signal) in the dataset.")
 
 
-        # ==================================================
-        # Diagnose and remove globally constant features
-        # ==================================================
-
-        # Identify columns with only one unique value
-        global_constant_cols = df.columns[df.nunique(dropna=False) <= 1].copy()
-
-        # Report globally constant features to delete
         if self.verbose:
-            print(f"☑️ {len(global_constant_cols)} features are globally constant:")
-            print(global_constant_cols.tolist())
-            print("➡️ They will be removed as they provide no information for ML model.")
-
-        # Drop constant features
-        df = df.drop(columns=global_constant_cols).copy()
-
-        # Visualise
-        if self.verbose:
-            print("✅ We now have", rows_after_cleaning, "rows and", df.shape[1], "columns (features = OHLCV + indicators + signal) in the dataset.", "\n")
+            print(
+                "✅ The prepared dataset contains OHLCV, all 10 ECH indicators, and the signal.",
+                "\n",
+            )
 
         return df
     
@@ -547,25 +518,38 @@ class MLPredictorStrategy(BaseStrategy):
         # Feature / target split
         # =========================
 
-        # Separate features X and target y
-        X = df.drop(columns=["Signal"]).copy()
+        # Use exactly the 10 ECH technical indicators from Table 5 as model features.
+        missing_features = [
+            feature for feature in ECH_TECHNICAL_INDICATORS if feature not in df.columns
+        ]
+        if missing_features:
+            raise ValueError(
+                f"Dataset is missing required ECH technical indicators: {missing_features}"
+            )
+
+        X = df.loc[:, ECH_TECHNICAL_INDICATORS].copy()
         y = df["Signal"].copy()
         
         return X, y
 
 
 
-    def build_pipeline(self) -> Pipeline:
+    def build_pipeline(self, n_features: int = len(ECH_TECHNICAL_INDICATORS)) -> Pipeline:
 
         # ===========================================================================
-        # Build MLP pipeline with feature selection and scaling
+        # Build MLP pipeline using twice as many hidden neurons as input features
         # ===========================================================================
 
         pipeline = Pipeline([
-            ("variance_filter", VarianceThreshold(threshold=0.0)),
             ("scaler", MinMaxScaler()),
-            ("selector", SelectKBest(score_func=pearson_score, k=self.n_features)),
-            ("mlp", MLPClassifier(random_state=self.random_state, max_iter=self.max_iter)),
+            (
+                "mlp",
+                MLPClassifier(
+                    hidden_layer_sizes=(2 * n_features,),
+                    random_state=self.random_state,
+                    max_iter=self.max_iter,
+                ),
+            ),
         ])
 
         return pipeline
@@ -579,7 +563,7 @@ class MLPredictorStrategy(BaseStrategy):
         # ================================================================
 
         # Create a fresh model pipeline for this date.
-        model = self.build_pipeline()
+        model = self.build_pipeline(n_features=X_train.shape[1])
 
         # Silence convergence warnings if max_iter is too low
         with warnings.catch_warnings():
@@ -655,13 +639,6 @@ class MLPredictorStrategy(BaseStrategy):
             # Prepare training dataset, split into features and target
             X_train, y_train = self.feature_target_split_dataset(train_df)
 
-            # n_features cannot exceed number of available columns
-            if self.n_features > X_train.shape[1]:
-                raise ValueError(
-                    f"n_features ({self.n_features}) cannot be larger than "
-                    f"the number of available features ({X_train.shape[1]})."
-                )
-            
             # Extract only the features from the row we want to predict.
             X_predict, _ = self.feature_target_split_dataset(df.loc[[prediction_date]])
 
@@ -750,13 +727,6 @@ class MLPredictorStrategy(BaseStrategy):
             # Prepare training dataset, split into features and target
             X_train, y_train = self.feature_target_split_dataset(train_df)
 
-            # n_features cannot exceed number of available columns
-            if self.n_features > X_train.shape[1]:
-                raise ValueError(
-                    f"n_features ({self.n_features}) cannot be larger than "
-                    f"the number of available features ({X_train.shape[1]})."
-                )
-            
             # Extract only the features from the row we want to predict.
             X_predict, _ = self.feature_target_split_dataset(df.loc[[prediction_date]])
             display(X_predict.tail(1))
@@ -845,13 +815,6 @@ class MLPredictorStrategy(BaseStrategy):
         # Prepare training dataset, split into features and target
         X_train, y_train = self.feature_target_split_dataset(train_df)
 
-        # n_features cannot exceed number of available columns
-        if self.n_features > X_train.shape[1]:
-            raise ValueError(
-                f"n_features ({self.n_features}) cannot be larger than "
-                f"the number of available features ({X_train.shape[1]})."
-            )
-        
         # Extract only the features from the row we want to predict.
         X_predict, _ = self.feature_target_split_dataset(df.loc[[prediction_date]])
 
