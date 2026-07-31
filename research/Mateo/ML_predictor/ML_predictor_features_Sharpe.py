@@ -408,6 +408,10 @@ class MLPredictorStrategy(BaseStrategy):
         df.ta.cores = 0
         df.ta.strategy(lookahead=False)
 
+        # Drop mathematically unsafe TIs – they produce values > e^300 that lead to overflow in calculations
+        unsafe_transform_columns = ["EXP", "COSH", "SINH"]
+        df = df.drop(columns=unsafe_transform_columns, errors="ignore")
+
         # Drop DPO created by df.ta.strategy(), because default DPO may be centered/lookahead-biased
         df = df.drop(columns=["DPO_20"], errors="ignore")
 
