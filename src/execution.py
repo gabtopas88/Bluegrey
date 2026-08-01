@@ -15,6 +15,22 @@ logger = logging.getLogger(__name__)
 _TERMINAL_STATUSES = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
 
 
+def _contract_label(contract) -> str:
+    """
+    Best-effort human label for a contract, safe on UNQUALIFIED contracts.
+
+    localSymbol is only populated after IBKR qualification. Every boot path
+    (DataManager.subscribe, PortfolioManager.initialize, _prime_strategy)
+    qualifies the universe, so localSymbol is normally set — but logging must
+    never itself raise or emit an empty string when something upstream failed.
+    """
+    return (
+        getattr(contract, 'localSymbol', '')
+        or getattr(contract, 'symbol', '')
+        or str(contract)
+    )
+
+
 class ExecutionHandler:
     """
     Asset-Agnostic Order Router & Manager.
@@ -40,15 +56,23 @@ class ExecutionHandler:
         # state — bounding memory growth over long sessions.
         self.active_orders: Dict[int, dict] = {}
 
-    def execute_signal(self, signal):
+    def execute_signal(self, signal) -> int:
         """
         Input: A StrategySignal object (defined in base.py).
         Action: Places all orders contained in the signal and records telemetry.
+
+        Returns the number of orders actually handed to IBKR. The engine uses
+        this to detect the state-desync case where the strategy has already
+        committed a position transition but nothing reached the broker.
+
         """
         if not signal or not signal.orders:
-            return
+            return 0
 
         logger.info(f"🚀 SIGNAL RECEIVED: {signal.signal_type}")
+
+        requested = len(signal.orders)
+        placed = 0
 
         for order_instruction in signal.orders:
             # UNPACKING THE GENERIC INSTRUCTION
@@ -58,6 +82,8 @@ class ExecutionHandler:
             order_type = order_instruction['type']    # MKT, LMT, etc.
             estimated_price = order_instruction.get('estimated_price', 0.0)
             estimated_volatility = order_instruction.get('volatility')
+
+            label = _contract_label(contract)
 
             # Create the IB Order Object
             limit_price = None
@@ -73,15 +99,35 @@ class ExecutionHandler:
                 logger.warning(f"⚠️ Order type {order_type} not implemented yet. Defaulting to MKT.")
                 ib_order = MarketOrder(action, qty)
 
-            # Safety: Qualify Contract
-            self.ib.qualifyContracts(contract)
+            # Diagnostic only — we do NOT qualify here (see docstring). An
+            # unqualified contract still routes if symbol/secType/exchange/
+            # currency are populated, so we warn loudly and attempt the send
+            # rather than dropping a leg and leaving the other one naked.
+            if not getattr(contract, 'conId', 0):
+                logger.error(
+                    f"⚠️ Contract {label} has no conId (not qualified at boot). "
+                    f"Attempting the send anyway — investigate the boot sequence."
+                )
 
             # FIRE
-            trade = self.ib.placeOrder(contract, ib_order)
+            try:
+                trade = self.ib.placeOrder(contract, ib_order)
+            except Exception as e:
+                # NEVER fail silently again. This is the exact path that cost a
+                # week of ambiguity: the strategy committed a position while
+                # nothing reached the broker.
+                logger.critical(
+                    f"🚨 ORDER SEND FAILED for {action} {qty} {label} "
+                    f"({signal.signal_type}): {e}",
+                    exc_info=True,
+                )
+                continue
+
+            placed += 1
 
             # Track the Order (denormalize estimated_price and con_id for the fill callback)
             self.active_orders[trade.order.orderId] = {
-                'symbol':          contract.localSymbol,
+                'symbol':          label,
                 'con_id':          getattr(contract, 'conId', 0),
                 'action':          action,
                 'qty':             qty,
@@ -91,7 +137,7 @@ class ExecutionHandler:
                 'signal_type':     signal.signal_type,
             }
 
-            logger.info(f"🔫 ORDER SENT: {action} {qty} {contract.localSymbol} (ID: {trade.order.orderId})")
+            logger.info(f"🔫 ORDER SENT: {action} {qty} {label} (ID: {trade.order.orderId})")
 
             # --- TELEMETRY: persist the order send ---
             if self.telemetry:
@@ -99,7 +145,7 @@ class ExecutionHandler:
                     self.telemetry.record_order(
                         ib_order_id=trade.order.orderId,
                         signal_type=signal.signal_type,
-                        symbol=contract.localSymbol,
+                        symbol=label,
                         con_id=getattr(contract, 'conId', 0),
                         action=action,
                         qty=qty,
@@ -110,6 +156,23 @@ class ExecutionHandler:
                     )
                 except Exception as e:
                     logger.error(f"❌ Telemetry record_order failed: {e}")
+
+        # --- POST-SEND INTEGRITY REPORT ---
+        # A pairs trade is only meaningful as a complete set of legs. Surface
+        # both total and partial failure at CRITICAL so they can never again be
+        # inferred only from the absence of telemetry rows.
+        if placed == 0:
+            logger.critical(
+                f"🚨 EXECUTION FAILURE: {requested} order(s) for {signal.signal_type} "
+                f"were requested and NONE reached IBKR."
+            )
+        elif placed < requested:
+            logger.critical(
+                f"🚨 PARTIAL EXECUTION: only {placed}/{requested} order(s) for "
+                f"{signal.signal_type} reached IBKR. A spread leg may now be NAKED."
+            )
+
+        return placed
 
     def on_order_status(self, trade: Trade):
         """
