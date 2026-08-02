@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import timedelta
+from pathlib import Path
 from typing import Optional
 import pandas as pd
 from src import config
@@ -14,7 +15,13 @@ from src.bar_source import (
     POLICY_FFILL,
     VALID_MISSING_BAR_POLICIES,
 )
-from src.telemetry import compute_params_hash, make_backtest_run_id
+from src.telemetry import (
+    TelemetryStore,
+    canonical_params_payload,
+    compute_params_hash,
+    make_backtest_run_id,
+    RUN_KIND_BACKTEST,
+)
 
 # Minimal Logging for Backtest (Clean Output)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -150,6 +157,10 @@ class VirtualBroker:
                 # directly comparable to the live telemetry's realized
                 # slippage_bps without recomputing it from a join.
                 'estimated_price': price,
+                # Carries the synthetic order id assigned by the engine so a
+                # fill row can be joined back to its order row, exactly as
+                # ib_order_id links the two live streams.
+                'bt_order_id': order.get('_bt_order_id'),
             })
         return fills
 
@@ -174,7 +185,9 @@ class BacktestEngine:
                  max_orders_per_minute: float = None,
                  gap_threshold: timedelta = None,
                  run_id: str = None,
-                 fee_params: dict = None):
+                 fee_params: dict = None,
+                 emit_telemetry: bool = False,
+                 telemetry_base_path=None):
         """
         :param data_library: ArcticDB library name. Required unless bar_source
             is supplied explicitly.
@@ -191,13 +204,25 @@ class BacktestEngine:
             NEXT bar's close). Note the live engine is effectively 0: it places
             a market order immediately after the bar closes and fills within
             seconds at roughly that close. Set 0 to model that.
+
+            Measured in BARS, so it scales with the timeframe automatically —
+            but the COST of a 1-bar delay does not. One bar of lag is ~60s on
+            minute data and a full hour on hourly data, where it becomes the
+            dominant term in any fill-price comparison.
         :param max_orders_per_minute: velocity cap. When None (default), the
             RiskManager's own limit applies — the same one the live engine
             enforces. Previously this was hardcoded to infinity, which let
             backtests fire order sequences no real IBKR account would accept.
             Pass float('inf') to restore the old uncapped behaviour.
         :param gap_threshold: bar-timestamp delta above which strategy state is
-            reset. Defaults to 1 hour.
+            reset. When None (default) it is DERIVED from the data's actual bar
+            interval as max(1 hour, 3 x bar_interval).
+
+            A fixed 1-hour threshold only works for intraday bars up to 1h. On
+            4-hour or daily bars every normal bar-to-bar step exceeds it, so the
+            strategy would reset on EVERY bar and silently produce a flat equity
+            curve that looks like "no signals found" rather than a failure. The
+            1-hour floor keeps minute-bar behaviour byte-identical to before.
 
             ⚠️ ASYMMETRY (surfaced deliberately, not silently patched): the live
             engine detects gaps PER-LEG from tick staleness inside DataManager,
@@ -210,6 +235,19 @@ class BacktestEngine:
             nothing — telemetry emission is a separate, opt-in concern.
         :param fee_params: override for the cost model parameters. Defaults to
             config.FEE_MODEL_PARAMS.
+        :param emit_telemetry: when True, writes the SAME three streams the live
+            engine writes (decisions / orders / fills) into an isolated tree at
+            config.BACKTEST_PATH/{run_id}/. Default False, so the research path
+            performs zero extra I/O.
+
+            Deliberately a separate flag rather than being triggered by passing
+            run_id: run_id is always computed for identity, and overloading an
+            identifier to also start writing files makes a harmless-looking
+            argument have side effects.
+        :param telemetry_base_path: override for the backtest telemetry root.
+            Defaults to config.BACKTEST_PATH. Never point this at the live
+            telemetry tree — see src/telemetry.py on why backtest rows must not
+            share day-partition files with live rows.
         """
         if missing_bar_policy not in VALID_MISSING_BAR_POLICIES:
             raise ValueError(
@@ -265,7 +303,13 @@ class BacktestEngine:
         
         self.trades = []
         self.history = [] 
+        # Resolved in _run_simulation once the bar interval is known — a fixed
+        # threshold cannot serve every timeframe (see _resolve_gap_threshold).
+        # Seeded with the 1-minute-era default so the attribute is always valid
+        # even if someone inspects the engine before running it.
+        self._gap_threshold_override = gap_threshold
         self.gap_threshold = gap_threshold if gap_threshold is not None else timedelta(hours=1)
+        self.bar_interval = None
 
         # --- RUN IDENTITY ---
         # params_hash folds strategy params, the EFFECTIVE risk mode and the fee
@@ -285,6 +329,98 @@ class BacktestEngine:
         self.rejected_bar_count = 0
         self.gap_event_count = 0
 
+        # --- TELEMETRY (opt-in) ---
+        # Configuration only. The store is constructed in _run_simulation, once
+        # the bar interval and the derived gap threshold are known, so the
+        # session manifest records the policies that were ACTUALLY in force
+        # rather than the unresolved arguments. It also means a run that never
+        # executes leaves no orphan directory behind.
+        self.telemetry = None
+        self._emit_telemetry = bool(emit_telemetry)
+        self._telemetry_base_path = telemetry_base_path
+        self._bt_order_seq = 0
+        self._fill_seq = 0
+
+    def _init_telemetry(self, start_date, end_date, n_bars: int):
+        """
+        Builds the backtest TelemetryStore. Called from _run_simulation once the
+        run policies are fully resolved, so the manifest is a faithful record of
+        the run rather than of its arguments.
+
+        Buffered, because a backtest emits thousands of rows per second and the
+        live engine's write-on-event path is O(n^2) at that rate. A backtest is
+        deterministic and re-runnable, so the crash-safety that cost buys is
+        worth nothing here.
+        """
+        if not self._emit_telemetry:
+            return
+
+        base = self._telemetry_base_path if self._telemetry_base_path is not None else getattr(
+            config, 'BACKTEST_PATH', config.DATA_DIR / 'backtests')
+
+        self.telemetry = TelemetryStore(
+            base_path=Path(base) / self.run_id,
+            strategy_name=self.strategy.__class__.__name__,
+            run_id=self.run_id,
+            run_kind=RUN_KIND_BACKTEST,
+            buffered=True,
+            session_context={
+                'risk_mode':            self.risk.mode,
+                'params_hash':          self.params_hash,
+                'params':               canonical_params_payload(
+                    strategy_params=self.params,
+                    risk_mode=self.risk.mode,
+                    fee_params=self.broker.fee_params,
+                ),
+                # The run policies belong in the manifest too. A parity result
+                # is meaningless without knowing which execution delay, bar
+                # interval and missing-bar policy produced it.
+                'bar_source':            self.bar_source.description,
+                'missing_bar_policy':    self.missing_bar_policy,
+                'execution_delay_bars':  self.execution_delay_bars,
+                'max_orders_per_minute': self.max_orders_per_minute,
+                'bar_interval_seconds':  self.bar_interval.total_seconds() if self.bar_interval is not None else None,
+                'gap_threshold_seconds': self.gap_threshold.total_seconds(),
+                'gap_threshold_source':  'explicit' if self._gap_threshold_override is not None else 'derived',
+                # Same config over different windows shares a params_hash by
+                # design, so the window is what distinguishes those runs.
+                'start_date':            str(start_date) if start_date is not None else None,
+                'end_date':              str(end_date) if end_date is not None else None,
+                'bar_count':             int(n_bars),
+                'first_bar_utc':         self._first_bar_utc,
+                'last_bar_utc':           self._last_bar_utc,
+            },
+        )
+
+    def _resolve_gap_threshold(self, index) -> timedelta:
+        """
+        Derives the gap threshold from the data's own bar interval.
+
+        A gap means "bars are missing", which is only definable relative to how
+        far apart bars are SUPPOSED to be. The interval is taken as the median
+        consecutive delta — robust to weekends, holidays and genuine gaps in a
+        way the mean or min is not.
+
+        Floor of 1 hour preserves the historical minute-bar default exactly, so
+        existing research at 1m/5m/15m/1h is unchanged. Above that the threshold
+        scales, so 4h and daily data stop resetting on every bar.
+        """
+        if self._gap_threshold_override is not None:
+            return self._gap_threshold_override
+
+        if index is None or len(index) < 3:
+            return timedelta(hours=1)
+
+        deltas = pd.Series(index).diff().dropna()
+        if deltas.empty:
+            return timedelta(hours=1)
+
+        interval = deltas.median()
+        if pd.isna(interval) or interval <= pd.Timedelta(0):
+            return timedelta(hours=1)
+
+        return max(timedelta(hours=1), interval * 3)
+
     def _print_run_banner(self, n_bars: int):
         """
         Prints the ACTIVE policies for this run.
@@ -301,12 +437,140 @@ class BacktestEngine:
               f"{'  (live ≈ 0)' if self.execution_delay_bars else ''}")
         print(f"   Max Orders/Min:    {self.max_orders_per_minute}")
         print(f"   Risk Mode:         {self.risk.mode}")
-        print(f"   Gap Threshold:     {self.gap_threshold}")
+        print(f"   Bar Interval:      {self.bar_interval}")
+        print(f"   Gap Threshold:     {self.gap_threshold}"
+              f"{'  (explicit)' if self._gap_threshold_override is not None else '  (derived)'}")
         print(f"   Fee Params:        {self.broker.fee_params}")
         print(f"   Params Hash:       {self.params_hash}")
         print(f"   Run ID:            {self.run_id}")
         print(f"   Bars:              {n_bars}")
         print("-------------------------------\n")
+
+    def _safe_state_get(self, key: str, default: float = 0.0) -> float:
+        """Defensive read of strategy state — not every strategy uses these keys.
+        Mirrors TradingEngine._safe_state_get so both engines emit the same
+        columns even for strategies that don't track leg quantities."""
+        try:
+            return float(self.strategy.state.get(key, default))
+        except (AttributeError, TypeError):
+            return default
+
+    def _record_decision(self, timestamp, signal, market_snapshot: dict):
+        """
+        Persists a decisions row for every on_bar call.
+
+        Mirrors TradingEngine._record_decision exactly, including the details
+        that look incidental but are load-bearing for Tier 1 replay parity:
+
+          - Fires on EVERY bar, unconditionally, including warmup, rejected and
+            no-transition bars. A backtest that only logged trading bars could
+            not be aligned against the live tape at all.
+          - Fires BEFORE Risk runs, so the row captures the strategy's INTENT
+            including any staged pending_transition.
+          - NaN closes are EXCLUDED from the snapshot. The live engine omits
+            tickless legs entirely; emitting NaN here instead would make two
+            identical market states serialise differently and show up as a false
+            divergence.
+        """
+        if not self.telemetry:
+            return
+
+        try:
+            snapshot = {
+                str(sym): float(val)
+                for sym, val in market_snapshot.items()
+                if val is not None and not pd.isna(val)
+            }
+            meta = signal.meta if signal and signal.meta else {}
+
+            self.telemetry.record_decision(
+                timestamp=timestamp,
+                signal_type=signal.signal_type if signal else "NONE",
+                current_pos=meta.get('current_pos', 0),
+                held_qty_y=self._safe_state_get('held_qty_y'),
+                held_qty_x=self._safe_state_get('held_qty_x'),
+                meta=meta,
+                market_snapshot=snapshot,
+            )
+        except Exception as e:
+            logger.error(f"❌ Telemetry record_decision failed: {e}")
+
+    def _record_order(self, order, signal_type: str, timestamp, market_snapshot: dict):
+        """
+        Persists an orders row at STAGING time.
+
+        The live engine writes this row the moment placeOrder() returns, which
+        is immediately after the decision. Staging is the backtest's equivalent
+        moment — recording at fill time instead would misattribute the order to
+        a later bar and break the timing comparison.
+
+        estimated_price is the frictionless bar price at staging, matching the
+        live engine's pre-trade estimate, so the two are directly comparable.
+        """
+        if not self.telemetry:
+            return
+
+        try:
+            contract = order.get('contract')
+            price = market_snapshot.get(order.get('symbol'))
+            self.telemetry.record_order(
+                ib_order_id=order.get('_bt_order_id', 0),
+                signal_type=signal_type,
+                symbol=order.get('symbol'),
+                con_id=getattr(contract, 'conId', 0) or 0,
+                action=order.get('action', ''),
+                qty=order.get('qty', 0.0),
+                order_type=order.get('order_type', 'MKT'),
+                estimated_price=float(price) if price is not None and not pd.isna(price) else float('nan'),
+                limit_price=order.get('limit_price'),
+                estimated_volatility=order.get('estimated_volatility'),
+                timestamp=timestamp,
+            )
+        except Exception as e:
+            logger.error(f"❌ Telemetry record_order failed: {e}")
+
+    def _record_fill(self, fill, timestamp):
+        """
+        Persists a fills row.
+
+        Two mappings are deliberate:
+
+          - side is emitted as BOT/SLD, not BUY/SELL, because that is what IBKR
+            reports and the column has to be comparable without translation.
+          - commission carries commission + regulatory. IBKR's CommissionReport
+            is an all-in figure, whereas our fee model splits the two; summing
+            is the closest analogue. For FX the regulatory term is zero anyway.
+
+        realized_pnl is emitted as 0.0 and is NOT comparable to live. IBKR
+        computes it under its own lot-matching convention; the VirtualBroker
+        tracks net cash, not lots. Guessing a convention would produce a column
+        that looks comparable and silently isn't — an explicit zero is the
+        honest option. Closing this gap needs lot tracking in VirtualBroker.
+        """
+        if not self.telemetry:
+            return
+
+        try:
+            action = str(fill.get('action', '')).upper()
+            side = 'BOT' if action in ('BUY', 'BOT') else 'SLD'
+            order_id = fill.get('bt_order_id') or 0
+            self._fill_seq += 1
+
+            self.telemetry.record_fill(
+                ib_order_id=int(order_id),
+                exec_id=f"bt-{order_id}-{self._fill_seq}",
+                symbol=fill.get('asset'),
+                con_id=getattr(self.instruments.get(fill.get('asset')), 'conId', 0) or 0,
+                side=side,
+                shares=fill.get('qty', 0.0),
+                price=fill.get('price', 0.0),
+                commission=fill.get('commission', 0.0) + fill.get('regulatory', 0.0),
+                realized_pnl=0.0,
+                estimated_price=fill.get('estimated_price', float('nan')),
+                timestamp=timestamp,
+            )
+        except Exception as e:
+            logger.error(f"❌ Telemetry record_fill failed: {e}")
 
     def _drain_ready_orders(self, bar_index: int, market_snapshot: dict, timestamp):
         """
@@ -336,6 +600,7 @@ class BacktestEngine:
         for fill in fills:
             self.trades.append({**fill, 'time': timestamp})
             filled_keys.append(fill['asset'])
+            self._record_fill(fill, timestamp)
 
         # Anything ready but unfilled goes back on the queue at the same
         # readiness, so it retries immediately next bar.
@@ -346,6 +611,20 @@ class BacktestEngine:
         self._order_queue = still_pending
 
     def run(self, start_date, end_date):
+        """
+        Runs the simulation.
+
+        Thin guard around _run_simulation so buffered telemetry is flushed even
+        if the run raises. close() is idempotent, so the normal completion path
+        flushing first costs nothing.
+        """
+        try:
+            return self._run_simulation(start_date, end_date)
+        finally:
+            if self.telemetry:
+                self.telemetry.close()
+
+    def _run_simulation(self, start_date, end_date):
         print(f"⏳ Loading Data for {len(self.instruments)} assets ({start_date} to {end_date})...")
 
         universe = self.bar_source.load(start_date, end_date)
@@ -353,6 +632,23 @@ class BacktestEngine:
         if universe is None or universe.empty:
             print("❌ Universe is empty after alignment.")
             return pd.DataFrame()
+
+        # Resolve timeframe-dependent policy from the data itself, then build
+        # telemetry so the manifest captures the resolved values.
+        deltas = pd.Series(universe.index).diff().dropna()
+        self.bar_interval = deltas.median() if not deltas.empty else None
+        self.gap_threshold = self._resolve_gap_threshold(universe.index)
+
+        if self.bar_interval is not None and self.gap_threshold <= self.bar_interval:
+            print(
+                f"⚠️ gap_threshold ({self.gap_threshold}) is not greater than the bar "
+                f"interval ({self.bar_interval}). Strategy state will reset on every "
+                f"bar and no position will ever be held."
+            )
+
+        self._first_bar_utc = str(universe.index[0]) if len(universe) else None
+        self._last_bar_utc = str(universe.index[-1]) if len(universe) else None
+        self._init_telemetry(start_date, end_date, len(universe))
 
         cols = universe.columns
         print(f"▶️ Simulating {len(universe)} ticks...")
@@ -400,7 +696,12 @@ class BacktestEngine:
             self._drain_ready_orders(bar_index, market_snapshot, timestamp)
 
             signal = self.strategy.on_bar(latest_bars)
-            
+
+            # --- TELEMETRY: record EVERY bar, unconditionally ---
+            # Placed here, before Risk, so the row captures strategy INTENT —
+            # identical to the live engine's ordering.
+            self._record_decision(timestamp, signal, market_snapshot)
+
             if signal:
                 if signal.meta:
                     record = signal.meta.copy()
@@ -432,7 +733,13 @@ class BacktestEngine:
                         self.strategy.commit_pending_transition(signal)
                         ready_index = bar_index + self.execution_delay_bars
                         for order in signal.orders:
-                            self._order_queue.append((ready_index, order))
+                            # Shallow-copy before tagging so the strategy's own
+                            # order dicts are never mutated by the engine.
+                            self._bt_order_seq += 1
+                            queued = dict(order)
+                            queued['_bt_order_id'] = self._bt_order_seq
+                            self._record_order(queued, signal.signal_type, timestamp, market_snapshot)
+                            self._order_queue.append((ready_index, queued))
                     else:
                         self.strategy.rollback_pending_transition()
 
@@ -443,6 +750,13 @@ class BacktestEngine:
                 self._drain_ready_orders(bar_index, market_snapshot, timestamp)
 
             self.broker.mark_to_market(market_snapshot, timestamp)
+
+        # Buffered telemetry is worthless unless it reaches disk. Flushed here
+        # and again in the finally-guard below so an exception mid-run still
+        # leaves a partial, diagnosable log.
+        if self.telemetry:
+            self.telemetry.close()
+            print(f"📒 Backtest telemetry written: {self.telemetry.base_path}")
 
         print("✅ Backtest Complete.")
         self._generate_tearsheet()

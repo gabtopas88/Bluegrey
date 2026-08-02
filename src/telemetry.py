@@ -214,13 +214,14 @@ def compute_params_hash(strategy_params: Optional[dict],
 
 
 def make_backtest_run_id(params_hash: str,
-                         timestamp: Optional[datetime] = None) -> str:
+                         timestamp: Optional[datetime] = None,
+                         suffix: Optional[str] = None) -> str:
     """
     Builds the run_id for a backtest:
-        backtest_{params_hash}_{YYYYmmddTHHMMSSZ}
+        backtest_{params_hash}_{YYYYmmddTHHMMSS.ffffffZ}_{suffix}
 
-    The params_hash makes every run of a given configuration groupable; the UTC
-    timestamp keeps each individual execution distinct.
+    The params_hash makes every run of a given configuration groupable; the
+    timestamp and suffix keep each individual execution distinct.
 
     Distinctness is NOT cosmetic. _append() does read-modify-write into
     {stream}/{date}.parquet, so re-running with an identical run_id against an
@@ -228,10 +229,21 @@ def make_backtest_run_id(params_hash: str,
     first — doubling every decision and quietly corrupting every parity
     comparison downstream. The store also guards this (see
     allow_existing_run_id), but the id itself should not invite the collision.
+
+    Why microseconds AND a random suffix: second resolution is not enough. The
+    same configuration backtested over several timeframes or date ranges in a
+    loop produces an identical params_hash, and those runs launch within the
+    same second — so a second-resolution id collides on exactly the workflow
+    this is built for. Microseconds fix the common case; the random suffix
+    removes the dependency on clock resolution entirely.
+
+    :param suffix: optional explicit uniquifier, primarily for tests that need
+        a reproducible id. Randomly generated when omitted.
     """
     ts = timestamp or datetime.now(timezone.utc)
     ts_utc = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-    return f"backtest_{params_hash}_{ts_utc.strftime('%Y%m%dT%H%M%SZ')}"
+    tag = suffix if suffix is not None else uuid.uuid4().hex[:6]
+    return f"backtest_{params_hash}_{ts_utc.strftime('%Y%m%dT%H%M%S.%fZ')}_{tag}"
 
 
 def _validate_run_id(run_id: str) -> str:
@@ -383,11 +395,16 @@ class TelemetryStore:
     inject it and the backtester gets a deterministic, reproducible identity.
     """
 
+    # Buffered mode auto-flushes past this many queued rows, bounding memory on
+    # long backtests without giving up batching.
+    FLUSH_THRESHOLD_ROWS = 50_000
+
     def __init__(self, base_path: Path, strategy_name: str = "unknown",
                  session_context: Optional[dict] = None,
                  run_id: Optional[str] = None,
                  run_kind: str = RUN_KIND_LIVE,
-                 allow_existing_run_id: bool = False):
+                 allow_existing_run_id: bool = False,
+                 buffered: bool = False):
         """
         :param session_context: Optional dict of extra run metadata merged into
             the session manifest (e.g. {'risk_mode': 'SHADOW', 'market_data_type': 3}).
@@ -411,6 +428,20 @@ class TelemetryStore:
             REFUSE by default and fail loudly. Set True only when deliberately
             resuming into an existing run. The live path is unaffected — a fresh
             uuid4 can never collide.
+        :param buffered: accumulate rows in memory and write them in batches
+            instead of one file rewrite per row.
+
+            LIVE MUST STAY UNBUFFERED (the default). _append() does
+            read-modify-write so that a crash loses zero rows; that guarantee is
+            the whole reason the live event log is trustworthy.
+
+            A BACKTEST is the opposite case: it emits thousands of rows per
+            second, and unbuffered writes are O(n^2) — a one-year minute
+            backtest would rewrite a growing Parquet file ~375,000 times. A
+            backtest is also deterministic and re-runnable, so losing a partial
+            run to a crash costs nothing. Callers using buffered=True MUST call
+            flush() or close() (or use the store as a context manager), or the
+            tail of the run is never written.
         """
         self.base_path = Path(base_path)
         self.strategy_name = strategy_name
@@ -421,6 +452,12 @@ class TelemetryStore:
         self.run_kind = str(run_kind or RUN_KIND_LIVE).lower()
 
         self.session_context = session_context or {}
+
+        # Write batching. _buffer maps a target Parquet path to the rows queued
+        # for it, so a flush touches each file exactly once.
+        self._buffered = bool(buffered)
+        self._buffer = {}
+        self._buffered_row_count = 0
 
         # Ensure stream directories exist upfront.
         for stream in SCHEMAS.keys():
@@ -445,6 +482,8 @@ class TelemetryStore:
         logger.info(f"📒 Telemetry initialized at {self.base_path}")
         logger.info(f"   run_id = {self.run_id}")
         logger.info(f"   run_kind = {self.run_kind}")
+        if self._buffered:
+            logger.info(f"   write mode = BUFFERED (flush required)")
 
     # ==========================================
     # 🗂️ MANIFEST & FILE PATHS
@@ -497,6 +536,16 @@ class TelemetryStore:
         ts = row['timestamp_utc']
         path = self._path_for(stream, ts)
 
+        # Buffered path: queue the row and let flush() do the file I/O. The row
+        # is still schema-validated at flush time, so a schema violation is
+        # caught either way — just later.
+        if self._buffered:
+            self._buffer.setdefault((stream, path), []).append(row)
+            self._buffered_row_count += 1
+            if self._buffered_row_count >= self.FLUSH_THRESHOLD_ROWS:
+                self.flush()
+            return
+
         # Coerce to a single-row Arrow table with schema enforcement.
         try:
             new_table = pa.Table.from_pylist([row], schema=schema)
@@ -519,6 +568,56 @@ class TelemetryStore:
             pq.write_table(combined, path, compression='snappy')
         except Exception as e:
             logger.error(f"❌ Failed to write {path}: {e}")
+
+    def flush(self):
+        """
+        Writes every buffered row to disk and clears the buffer.
+
+        No-op when unbuffered. Groups by target file so each Parquet file is
+        read-modified-written ONCE per flush rather than once per row — that
+        difference is what makes instrumented backtests viable.
+        """
+        if not self._buffered or not self._buffer:
+            return
+
+        for (stream, path), rows in self._buffer.items():
+            schema = SCHEMAS[stream]
+            try:
+                new_table = pa.Table.from_pylist(rows, schema=schema)
+            except Exception as e:
+                logger.error(f"❌ Telemetry schema violation in '{stream}' during flush: {e}")
+                continue
+
+            if path.exists():
+                try:
+                    existing = pq.read_table(path)
+                    combined = pa.concat_tables([existing, new_table])
+                except Exception as e:
+                    logger.error(f"❌ Failed to read existing {path}: {e}. Skipping flush for this file.")
+                    continue
+            else:
+                combined = new_table
+
+            try:
+                pq.write_table(combined, path, compression='snappy')
+            except Exception as e:
+                logger.error(f"❌ Failed to write {path}: {e}")
+
+        self._buffer = {}
+        self._buffered_row_count = 0
+
+    def close(self):
+        """Flushes any pending rows. Safe to call repeatedly."""
+        self.flush()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Flush even on an exception: a partial backtest log is far more useful
+        # for diagnosis than no log at all.
+        self.close()
+        return False
 
     # ==========================================
     # 📝 PUBLIC RECORDERS — One per stream
