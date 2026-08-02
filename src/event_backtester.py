@@ -113,8 +113,14 @@ class VirtualBroker:
             else:
                 asset_class = 'STK'
             
-            # Check price availability
-            price = market_prices.get(key)
+            # Check price availability.
+            # _bt_market_key is the UNIVERSE key ('C:AUDUSD'), resolved by the
+            # engine from contract identity. order['symbol'] is the contract's
+            # localSymbol ('AUD.USD'), which is what the Risk Manager and the
+            # live telemetry use — it is NOT a key into market_prices, and
+            # looking prices up by it silently filled nothing at all.
+            lookup_key = order.get('_bt_market_key') or key
+            price = market_prices.get(lookup_key)
             if pd.isna(price) or price is None:
                 continue 
             
@@ -146,7 +152,11 @@ class VirtualBroker:
             self.total_slippage_incurred += cost_details['slippage']
                 
             fills.append({
-                'asset': key,
+                # Universe key, used for position bookkeeping.
+                'asset': order.get('_bt_market_key') or key,
+                # localSymbol, matching what the live telemetry records so the
+                # two fills streams carry comparable labels.
+                'symbol': key,
                 'action': action,
                 'qty': qty,
                 'price': fill_price,
@@ -279,6 +289,11 @@ class BacktestEngine:
         # when one was constructed, rather than opening a second connection.
         self.store = getattr(self.bar_source, 'store', None)
 
+        # Qualification substitute: must run BEFORE the RiskManager whitelist is
+        # ever consulted and before the strategy builds orders.
+        self._local_to_key = {}
+        self._ensure_local_symbols()
+
         self.strategy = strategy_class(instruments, params)
         self.broker = VirtualBroker(start_cap, fee_params=fee_params)
         # RiskManager needs the universe so its symbol whitelist resolves
@@ -340,6 +355,48 @@ class BacktestEngine:
         self._telemetry_base_path = telemetry_base_path
         self._bt_order_seq = 0
         self._fill_seq = 0
+
+    def _ensure_local_symbols(self):
+        """
+        Populates localSymbol on any unqualified contract.
+
+        IBKR sets localSymbol during qualifyContracts(), which never happens in a
+        backtest — there is no connection. Two things break as a result:
+
+          1. RiskManager._allowed_local_symbols() builds its whitelist from
+             truthy localSymbols. With every contract unqualified the whitelist
+             is EMPTY, so in ENFORCE mode every order is rejected and the
+             backtest silently trades nothing.
+          2. Backtest telemetry would label fills differently from live
+             telemetry, which records contract.localSymbol.
+
+        We synthesize the same string IBKR would produce ('AUD.USD' for
+        Forex, the plain symbol otherwise) so both problems disappear and the
+        two engines' telemetry is directly comparable. Contracts already
+        carrying a localSymbol are left untouched.
+        """
+        synthesized = {}
+        for kkey, contract in self.instruments.items():
+            if getattr(contract, 'localSymbol', ''):
+                continue
+            sym = getattr(contract, 'symbol', '') or str(kkey)
+            if getattr(contract, 'secType', '') == 'CASH':
+                cur = getattr(contract, 'currency', '')
+                local = f"{sym}.{cur}" if cur else sym
+            else:
+                local = sym
+            try:
+                contract.localSymbol = local
+                synthesized[kkey] = local
+            except Exception:
+                pass
+        if synthesized:
+            logger.info(f"🏷️ Synthesized localSymbol for unqualified contracts: {synthesized}")
+        # Reverse map from localSymbol -> universe key, used to resolve market
+        # prices for orders (which carry localSymbol, not the universe key).
+        self._local_to_key = {
+            getattr(c, 'localSymbol', '') or k: k for k, c in self.instruments.items()
+        }
 
     def _init_telemetry(self, start_date, end_date, n_bars: int):
         """
@@ -512,7 +569,7 @@ class BacktestEngine:
 
         try:
             contract = order.get('contract')
-            price = market_snapshot.get(order.get('symbol'))
+            price = market_snapshot.get(order.get('_bt_market_key') or order.get('symbol'))
             self.telemetry.record_order(
                 ib_order_id=order.get('_bt_order_id', 0),
                 signal_type=signal_type,
@@ -559,7 +616,7 @@ class BacktestEngine:
             self.telemetry.record_fill(
                 ib_order_id=int(order_id),
                 exec_id=f"bt-{order_id}-{self._fill_seq}",
-                symbol=fill.get('asset'),
+                symbol=fill.get('symbol') or fill.get('asset'),
                 con_id=getattr(self.instruments.get(fill.get('asset')), 'conId', 0) or 0,
                 side=side,
                 shares=fill.get('qty', 0.0),
@@ -596,16 +653,21 @@ class BacktestEngine:
             return
 
         fills = self.broker.execute([o for _, o in ready], market_snapshot)
-        filled_keys = []
+
+        # Track fills by ORDER ID, not by symbol. Symbol matching is ambiguous —
+        # the order carries localSymbol while the fill carries the universe key,
+        # and two orders on the same leg in one batch are indistinguishable by
+        # symbol anyway. An id mismatch here silently leaves filled orders on the
+        # queue, where they re-fill on every subsequent bar.
+        filled_ids = {f.get('bt_order_id') for f in fills}
         for fill in fills:
             self.trades.append({**fill, 'time': timestamp})
-            filled_keys.append(fill['asset'])
             self._record_fill(fill, timestamp)
 
         # Anything ready but unfilled goes back on the queue at the same
         # readiness, so it retries immediately next bar.
         for ready_index, order in ready:
-            if order.get('symbol', order.get('key')) not in filled_keys:
+            if order.get('_bt_order_id') not in filled_ids:
                 still_pending.append((ready_index, order))
 
         self._order_queue = still_pending
@@ -738,6 +800,8 @@ class BacktestEngine:
                             self._bt_order_seq += 1
                             queued = dict(order)
                             queued['_bt_order_id'] = self._bt_order_seq
+                            queued['_bt_market_key'] = self._local_to_key.get(
+                                order.get('symbol'), order.get('symbol'))
                             self._record_order(queued, signal.signal_type, timestamp, market_snapshot)
                             self._order_queue.append((ready_index, queued))
                     else:
