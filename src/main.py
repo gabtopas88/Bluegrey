@@ -14,7 +14,12 @@ from src.data import DataManager
 from src.execution import ExecutionHandler
 from src.risk import RiskManager
 from src.portfolio import PortfolioManager
-from src.telemetry import TelemetryStore
+from src.telemetry import (
+    TelemetryStore,
+    canonical_params_payload,
+    compute_params_hash,
+    RUN_KIND_LIVE,
+)
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s')
@@ -73,30 +78,67 @@ class TradingEngine:
             mode=getattr(config, 'RISK_MODE', RiskManager.MODE_ENFORCE),
         )
 
-        # 3. TELEMETRY STORE
+        # 3. RUN CONFIGURATION FINGERPRINT (Workstream B)
+        # params_hash makes the CONFIGURATION addressable, not just the run. It
+        # is how the parity harness answers "was this backtest run under the same
+        # setup as this live session?" — a run_id alone cannot answer that.
+        #
+        # config.FEE_MODEL_PARAMS is accessed DIRECTLY rather than via getattr
+        # with a fallback, deliberately. A hash computed from partial inputs
+        # would claim comparability it does not have — two runs sharing a hash
+        # while modelling different costs is exactly the silent mismatch the
+        # harness exists to catch. Missing config is a deployment error and
+        # should fail loudly at boot, not degrade into a lying fingerprint.
+        #
+        # NOTE the risk-mode source: self.risk.mode, NOT config.RISK_MODE. The
+        # RiskManager silently downgrades an unrecognised mode to ENFORCE, so
+        # hashing the raw config string could record a mode never in force.
+        self.params_hash = compute_params_hash(
+            strategy_params=config.STRATEGY_PARAMS,
+            risk_mode=self.risk.mode,
+            fee_params=config.FEE_MODEL_PARAMS,
+        )
+
+        # 4. TELEMETRY STORE
         # One store per engine boot. New boot = new run_id. Written immediately
         # so a crash before connect() still leaves a session manifest behind.
         # session_context tags the manifest with the effective risk mode and the
         # market-data mode, so every run_id is self-describing for the parity
         # harness and for audit ("was this run risk-gated?").
+        #
+        # run_id is deliberately NOT passed: the live engine lets the store mint
+        # its own uuid4 (unchanged behaviour). Only the backtester injects a
+        # deterministic id. run_kind is passed explicitly for readability even
+        # though 'live' is the default.
+        #
+        # The full canonical params payload rides alongside the hash so that a
+        # failed parity check can show WHICH key differs — two disagreeing
+        # 12-char digests are not actionable on their own.
         telemetry_path = getattr(config, 'TELEMETRY_PATH', config.DATA_DIR / 'telemetry')
         self.telemetry = TelemetryStore(
             base_path=telemetry_path,
             strategy_name=self.strategy.__class__.__name__,
+            run_kind=RUN_KIND_LIVE,
             session_context={
                 'risk_mode':         self.risk.mode,
                 'market_data_type':  getattr(config, 'IB_MARKET_DATA_TYPE', 1),
+                'params_hash':       self.params_hash,
+                'params':            canonical_params_payload(
+                    strategy_params=config.STRATEGY_PARAMS,
+                    risk_mode=self.risk.mode,
+                    fee_params=config.FEE_MODEL_PARAMS,
+                ),
             },
         )
 
-        # 4. INFRASTRUCTURE
+        # 5. INFRASTRUCTURE
         self.data_manager = DataManager(self.ib, config.INSTRUMENTS)
         self.executor = ExecutionHandler(self.ib, telemetry=self.telemetry)
 
         # Portfolio Manager is constructed at boot, after IB connects.
         self.portfolio = None
 
-        # 5. SUPERVISOR STATE
+        # 6. SUPERVISOR STATE
         # _last_tick_utc is stamped by on_tick_event and is the liveness signal
         # the watchdog reads. _session_started_utc is the fallback reference
         # before the first tick of a (re)connected session ever arrives.
@@ -110,6 +152,7 @@ class TradingEngine:
         logger.info(f"   Universe: {list(config.INSTRUMENTS.keys())}")
         logger.info(f"   Risk Mode: {self.risk.mode}")
         logger.info(f"   Run ID: {self.telemetry.run_id}")
+        logger.info(f"   Params Hash: {self.params_hash}")
 
     def _load_strategy(self):
         """

@@ -16,9 +16,24 @@ Design principles:
 
 The store is the shared schema between live and backtest. Both write the same
 columns, and the parity harness (Workstream B) joins them on (timestamp, symbol).
+
+WORKSTREAM B (PARITY HARNESS) — RUN IDENTITY:
+    The live engine lets the store mint its own uuid4 run_id (unchanged
+    behaviour). The event backtester INJECTS a deterministic run_id derived from
+    a params_hash, so a backtest of a given configuration is addressable,
+    reproducible, and matchable against the live session it is meant to
+    reconcile with. See compute_params_hash() / make_backtest_run_id().
+
+    Backtests write to an ISOLATED tree (data/backtests/{run_id}/) rather than
+    the live telemetry tree. _append() does read-modify-write on a per-UTC-day
+    file, so a backtest pointed at data/telemetry/ would physically concatenate
+    its rows into the live event log — distinguishable only by run_id, but
+    bloating and risking the one artifact that must stay pristine.
 """
+import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +93,172 @@ def _safe_ibkr_float(value, default: float = 0.0) -> float:
         )
         return default
     return f
+
+
+# ==========================================
+# 🔑 RUN IDENTITY — params_hash & run_id
+# ==========================================
+# The parity harness must answer: "was this backtest run under the SAME
+# configuration as this live session?" A run_id alone cannot answer that — it is
+# an opaque label. params_hash makes the CONFIGURATION itself addressable.
+#
+# Three inputs are folded in, deliberately:
+#   1. strategy params  — entry_z / exit_z / z_lookback / delta / vt / sizing
+#   2. risk mode        — ENFORCE vs SHADOW changes which orders survive at all
+#   3. fee model params — the modelled cost of crossing the spread
+#
+# Omitting ANY of the three would let two runs share a hash while trading
+# differently — precisely the silent mismatch the harness exists to catch. A
+# SHADOW backtest must never be comparable-by-hash to an ENFORCE live session,
+# and a backtest run at 1.0 bps modelled slippage must never be confused with
+# one run at 3.0 bps once Tier 2 starts calibrating fees.py.
+
+# 48 bits of SHA-256. At the scale of "runs a human will ever launch", the
+# collision probability is negligible and the id stays readable in a filename.
+PARAMS_HASH_LEN = 12
+
+# run_id becomes BOTH a manifest filename ({run_id}.json) and a directory
+# component for backtest trees, so it is a path-injection surface. Constrain it.
+RUN_ID_MAX_LEN = 128
+_RUN_ID_SAFE_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+
+# Manifest 'run_kind' values. The harness uses these to tell a live session from
+# a replayed backtest without inspecting run_id string shape.
+RUN_KIND_LIVE = 'live'
+RUN_KIND_BACKTEST = 'backtest'
+
+
+def _canonicalize(value):
+    """
+    Recursively coerce a config value into a stable, JSON-serialisable form.
+
+    Stability is the entire point: the same logical configuration must produce
+    byte-identical JSON in every process on every machine, or the hash is worse
+    than useless — it would produce false parity mismatches that look like
+    engine bugs.
+
+    Rules:
+      - dict      -> keys coerced to str (sorting is applied at dump time)
+      - list/tuple-> order PRESERVED (order is meaningful), tuple flattened to
+                     list since JSON has no tuple type
+      - bool      -> left as bool. Checked BEFORE int because bool subclasses
+                     int in Python; without this, True would become 1.0 and
+                     collide with the integer 1.
+      - int/float -> float. So a notebook passing base_qty=100 hashes identically
+                     to a config carrying 100.0. Numeric type is not a strategy
+                     difference and must not fork the hash.
+      - None      -> None
+      - anything else (Contract objects, Enums, Path) -> str(). Lossy BY DESIGN:
+                     this is a fingerprint, not a serialiser.
+    """
+    if isinstance(value, dict):
+        return {str(k): _canonicalize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(v) for v in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def canonical_params_payload(strategy_params: Optional[dict],
+                             risk_mode: Optional[str],
+                             fee_params: Optional[dict]) -> dict:
+    """
+    The exact structure that gets hashed.
+
+    Exposed separately from the hash so the session manifest can persist it
+    verbatim. When a parity check fails on a hash mismatch you need to see WHICH
+    key differs — two disagreeing 12-char digests tell you nothing actionable.
+    """
+    return {
+        'strategy_params': _canonicalize(strategy_params or {}),
+        'risk_mode':       str(risk_mode or '').upper(),
+        'fee_params':      _canonicalize(fee_params or {}),
+    }
+
+
+def compute_params_hash(strategy_params: Optional[dict],
+                        risk_mode: Optional[str],
+                        fee_params: Optional[dict]) -> str:
+    """
+    Deterministic short digest of the full trading configuration.
+
+    Identical configuration -> identical hash, across processes and machines.
+    Used to build backtest run_ids and to assert live/backtest comparability.
+
+    :param strategy_params: e.g. config.STRATEGY_PARAMS
+    :param risk_mode: the EFFECTIVE, validated RiskManager mode — read it off
+        the constructed RiskManager (risk.mode), never off raw config. Config
+        may hold an unknown value that the RiskManager silently downgrades to
+        ENFORCE; hashing the config string would then record a mode that was
+        never actually in force.
+    :param fee_params: the IBKRFeeModel construction parameters, e.g.
+        {'default_slippage_bps': 1.0}.
+    """
+    payload = canonical_params_payload(strategy_params, risk_mode, fee_params)
+    # sort_keys makes dict insertion order irrelevant; separators strips the
+    # incidental whitespace that would otherwise vary by json version.
+    blob = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+        allow_nan=True,
+        default=str,
+    )
+    return hashlib.sha256(blob.encode('utf-8')).hexdigest()[:PARAMS_HASH_LEN]
+
+
+def make_backtest_run_id(params_hash: str,
+                         timestamp: Optional[datetime] = None) -> str:
+    """
+    Builds the run_id for a backtest:
+        backtest_{params_hash}_{YYYYmmddTHHMMSSZ}
+
+    The params_hash makes every run of a given configuration groupable; the UTC
+    timestamp keeps each individual execution distinct.
+
+    Distinctness is NOT cosmetic. _append() does read-modify-write into
+    {stream}/{date}.parquet, so re-running with an identical run_id against an
+    identical tree would silently concatenate the second run's rows onto the
+    first — doubling every decision and quietly corrupting every parity
+    comparison downstream. The store also guards this (see
+    allow_existing_run_id), but the id itself should not invite the collision.
+    """
+    ts = timestamp or datetime.now(timezone.utc)
+    ts_utc = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    return f"backtest_{params_hash}_{ts_utc.strftime('%Y%m%dT%H%M%SZ')}"
+
+
+def _validate_run_id(run_id: str) -> str:
+    """
+    Guards the injection point.
+
+    An injected run_id becomes a manifest filename, a directory component in the
+    isolated backtest tree, and a column value in every Parquet row. An unchecked
+    string is therefore a path-traversal vector ('../../etc/passwd') and a
+    corrupt-file risk. Fail at construction time, loudly, before anything
+    touches the filesystem.
+    """
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string.")
+
+    run_id = run_id.strip()
+
+    if len(run_id) > RUN_ID_MAX_LEN:
+        raise ValueError(
+            f"run_id exceeds {RUN_ID_MAX_LEN} characters: {run_id[:48]}..."
+        )
+    if not _RUN_ID_SAFE_RE.match(run_id):
+        raise ValueError(
+            f"run_id contains unsafe characters: {run_id!r}. "
+            "Allowed: ASCII letters, digits, dot, underscore, hyphen."
+        )
+    return run_id
 
 
 # ==========================================
@@ -146,10 +327,17 @@ class TelemetryStore:
     Files are partitioned by UTC date. The store auto-rotates when the day
     rolls over mid-session, so a session that crosses midnight produces two files
     per stream — exactly what range queries expect.
+
+    Workstream B: run_id is now injectable. Omit it and the store mints a uuid4
+    exactly as before (the live engine's path is byte-for-byte unchanged);
+    inject it and the backtester gets a deterministic, reproducible identity.
     """
 
     def __init__(self, base_path: Path, strategy_name: str = "unknown",
-                 session_context: Optional[dict] = None):
+                 session_context: Optional[dict] = None,
+                 run_id: Optional[str] = None,
+                 run_kind: str = RUN_KIND_LIVE,
+                 allow_existing_run_id: bool = False):
         """
         :param session_context: Optional dict of extra run metadata merged into
             the session manifest (e.g. {'risk_mode': 'SHADOW', 'market_data_type': 3}).
@@ -157,15 +345,48 @@ class TelemetryStore:
             "was this run risk-gated? what data did it trade on?" — without
             re-deriving it from logs. Forward-compatible: Workstream B can add a
             params_hash here so backtest/live runs key off the same identifier.
+            (Workstream B now does exactly that — callers should pass
+            'params_hash' and 'params' from compute_params_hash() /
+            canonical_params_payload().)
+        :param run_id: Optional explicit run identifier. When None (the live
+            engine's path) a uuid4 is minted, preserving the original behaviour
+            exactly. When supplied it is validated before any filesystem access.
+        :param run_kind: 'live' or 'backtest'. Recorded in the manifest so the
+            parity harness can classify a run without pattern-matching the
+            run_id string. Purely descriptive — it changes no write behaviour.
+        :param allow_existing_run_id: Reusing a run_id against a tree that
+            already holds one is a silent-corruption hazard: _append() does
+            read-modify-write, so the second run's rows would be concatenated
+            onto the first and every parity count would double. We therefore
+            REFUSE by default and fail loudly. Set True only when deliberately
+            resuming into an existing run. The live path is unaffected — a fresh
+            uuid4 can never collide.
         """
         self.base_path = Path(base_path)
         self.strategy_name = strategy_name
-        self.run_id = str(uuid.uuid4())
+
+        # Injectable identity (Workstream B). Validate BEFORE touching disk so a
+        # malformed id can never create a directory or a manifest.
+        self.run_id = _validate_run_id(run_id) if run_id is not None else str(uuid.uuid4())
+        self.run_kind = str(run_kind or RUN_KIND_LIVE).lower()
+
         self.session_context = session_context or {}
 
         # Ensure stream directories exist upfront.
         for stream in SCHEMAS.keys():
             (self.base_path / stream).mkdir(parents=True, exist_ok=True)
+
+        # Collision guard. An existing manifest for this run_id means this tree
+        # already holds rows under this identity; appending more would silently
+        # merge two runs into one. Fail before writing anything.
+        manifest_path = self._manifest_path()
+        if manifest_path.exists() and not allow_existing_run_id:
+            raise ValueError(
+                f"run_id '{self.run_id}' already exists at {manifest_path}. "
+                "Appending would silently merge two runs and corrupt parity "
+                "counts. Use a new run_id, or pass allow_existing_run_id=True "
+                "if you are deliberately resuming."
+            )
 
         # Write the session manifest. This is a human-readable breadcrumb that
         # makes "what was running in this session" answerable at a glance.
@@ -173,10 +394,16 @@ class TelemetryStore:
 
         logger.info(f"📒 Telemetry initialized at {self.base_path}")
         logger.info(f"   run_id = {self.run_id}")
+        logger.info(f"   run_kind = {self.run_kind}")
 
     # ==========================================
     # 🗂️ MANIFEST & FILE PATHS
     # ==========================================
+    def _manifest_path(self) -> Path:
+        """Path of this run's session manifest. Single definition, used by the
+        collision guard and the writer so the two can never disagree."""
+        return self.base_path / 'sessions' / f"{self.run_id}.json"
+
     def _write_session_manifest(self):
         """One JSON file per run, written at boot. Contains the run metadata."""
         manifest_dir = self.base_path / 'sessions'
@@ -185,6 +412,7 @@ class TelemetryStore:
         manifest = {
             'run_id':       self.run_id,
             'strategy':     self.strategy_name,
+            'run_kind':     self.run_kind,
             'started_utc':  datetime.now(timezone.utc).isoformat(),
         }
         # Merge caller-supplied run context (risk_mode, market_data_type, and
@@ -192,7 +420,7 @@ class TelemetryStore:
         for k, v in self.session_context.items():
             manifest.setdefault(k, v)
 
-        manifest_path = manifest_dir / f"{self.run_id}.json"
+        manifest_path = self._manifest_path()
         with open(manifest_path, 'w') as f:
             json.dump(manifest, f, indent=2, default=str)
 

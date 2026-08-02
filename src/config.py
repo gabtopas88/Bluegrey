@@ -41,9 +41,25 @@ LIBS = {
 # fills) plus session manifests, partitioned by UTC date.
 TELEMETRY_PATH = DATA_DIR / "telemetry"
 
+# --- BACKTEST TELEMETRY (Workstream B) ---
+# Backtest runs write the SAME three streams as the live engine, but into an
+# isolated tree: data/backtests/{run_id}/{stream}/{YYYY-MM-DD}.parquet
+#
+# Isolation is not tidiness, it is correctness. TelemetryStore._append() does a
+# read-modify-write on the day's Parquet file, so a backtest pointed at
+# TELEMETRY_PATH would physically concatenate its rows into the live event log —
+# separable only by run_id, but permanently bloating and risking the one artifact
+# that has to stay pristine. Backtest trees are disposable; the live tree is not.
+BACKTEST_PATH = DATA_DIR / "backtests"
+
 
 # --- DATA VENDORS ---
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "7AFgQiA1pZhVRjYfIup0LlLrZPVeyEJb")
+# SECURITY: this previously carried a live Polygon key as the os.getenv default,
+# which meant the secret was committed in source (and remains in git history —
+# the key must be ROTATED at the vendor, not merely deleted here). .env is
+# gitignored and is the correct home for it. An empty default fails loudly at
+# the first API call rather than silently authenticating as someone else.
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 
 # --- STRATEGY SETTINGS ---
 STRATEGY_CLASS = "KalmanPairsStrategy"
@@ -74,6 +90,30 @@ STRATEGY_PARAMS = {
     "hedge_drift_threshold_pct": 20.0,  # Boot-time hedge-ratio drift warning
 }
 
+# --- TRANSACTION COST MODEL PARAMETERS (Workstream B) ---
+# Single source of truth for IBKRFeeModel construction.
+#
+# Previously this value was hardcoded independently in THREE places:
+# VirtualBroker (event_backtester), PortfolioVectorEngine (vector_backtester),
+# and the IBKRFeeModel default itself. Three copies of a number that must agree
+# is three chances for them to silently disagree — and a cost assumption that
+# differs between the event backtester and the optimizer invalidates any
+# comparison between them.
+#
+# It is also an input to the run params_hash. A backtest run at 1.0 bps modelled
+# slippage must never be hash-comparable to one run at 3.0 bps, or the parity
+# harness would treat two materially different cost worlds as the same
+# configuration.
+#
+# ⚠️ CALIBRATION STATUS: UNCALIBRATED. 1.0 bps is a generic flat crossing cost
+# applied identically to STK / FX / CRYPTO, with no FX-specific bid/ask term.
+# On a high-turnover Kalman pairs strategy this is precisely where alpha dies.
+# Workstream B Tier 2 measures the real AUDUSD/NZDUSD figure against live IBKR
+# fills; do NOT hand-tune this value before that measurement exists.
+FEE_MODEL_PARAMS = {
+    "default_slippage_bps": 1.0,
+}
+
 # --- BOOT-TIME RECONCILIATION POLICY ---
 # What to do if broker positions can't be reconciled with strategy state on boot.
 #   'HALT'      : Refuse to start. Require human resolution. (Safest, default)
@@ -92,6 +132,11 @@ BOOT_ANOMALY_POLICY = 'HALT'
 # Env override: RISK_MODE=shadow (case-insensitive). Unknown values fall back to
 # ENFORCE inside the RiskManager (fail-safe). The effective mode is recorded in
 # the telemetry session manifest so every run_id is self-describing.
+#
+# NOTE for the params_hash: hash the EFFECTIVE mode read off the constructed
+# RiskManager (risk.mode), never this raw config string. An unknown value here is
+# silently downgraded to ENFORCE by the RiskManager, so hashing the config would
+# record a mode that was never actually in force.
 RISK_MODE = os.getenv("RISK_MODE", "ENFORCE").upper()
 
 # ==========================================
