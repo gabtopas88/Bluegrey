@@ -577,10 +577,13 @@ class BacktestEngine:
                 con_id=getattr(contract, 'conId', 0) or 0,
                 action=order.get('action', ''),
                 qty=order.get('qty', 0.0),
-                order_type=order.get('order_type', 'MKT'),
+                # StrategySignal.add_order stores these under 'type', 'price'
+                # and 'volatility' (see strategies/base.py). The alternate keys
+                # are accepted too so hand-built order dicts still work.
+                order_type=order.get('type', order.get('order_type', 'MKT')),
                 estimated_price=float(price) if price is not None and not pd.isna(price) else float('nan'),
-                limit_price=order.get('limit_price'),
-                estimated_volatility=order.get('estimated_volatility'),
+                limit_price=order.get('price', order.get('limit_price')),
+                estimated_volatility=order.get('volatility', order.get('estimated_volatility')),
                 timestamp=timestamp,
             )
         except Exception as e:
