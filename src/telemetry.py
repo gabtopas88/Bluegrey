@@ -317,6 +317,56 @@ SCHEMAS = {
 }
 
 
+def read_telemetry_range(base_path, stream: str, start: datetime, end: datetime,
+                         run_id: Optional[str] = None) -> pd.DataFrame:
+    """
+    Module-level reader for a telemetry stream over an inclusive UTC date range.
+
+    Deliberately NOT a method: reading must not require constructing a
+    TelemetryStore. Construction writes a session manifest and trips the
+    run_id collision guard, so a reader that instantiates a store to read an
+    EXISTING run would either corrupt it or refuse to open it. The parity
+    harness and TelemetryReplaySource both need pure reads.
+
+    TelemetryStore.read_range() delegates here so there is exactly one
+    implementation of the read path.
+
+    :param base_path: telemetry tree root (live tree or a backtest tree)
+    :param stream: 'decisions', 'orders', or 'fills'
+    :param start, end: bounding datetimes (UTC)
+    :param run_id: optional filter to slice a single session
+    """
+    if stream not in SCHEMAS:
+        raise ValueError(f"Unknown stream: {stream}")
+
+    stream_dir = Path(base_path) / stream
+    if not stream_dir.exists():
+        return pd.DataFrame(columns=[f.name for f in SCHEMAS[stream]])
+
+    # Walk every Parquet file in the stream directory, filter by date range.
+    # For minute-bar volumes this is fine; if telemetry grows to GBs,
+    # switch to pyarrow.dataset for pushdown filtering.
+    start_utc = pd.Timestamp(start).tz_convert('UTC') if pd.Timestamp(start).tz else pd.Timestamp(start).tz_localize('UTC')
+    end_utc = pd.Timestamp(end).tz_convert('UTC') if pd.Timestamp(end).tz else pd.Timestamp(end).tz_localize('UTC')
+
+    frames = []
+    for path in sorted(stream_dir.glob('*.parquet')):
+        try:
+            df = pd.read_parquet(path)
+            df = df[(df['timestamp_utc'] >= start_utc) & (df['timestamp_utc'] <= end_utc)]
+            if run_id:
+                df = df[df['run_id'] == run_id]
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:
+            logger.warning(f"Skipping unreadable telemetry file {path}: {e}")
+
+    if not frames:
+        return pd.DataFrame(columns=[f.name for f in SCHEMAS[stream]])
+
+    return pd.concat(frames, ignore_index=True).sort_values('timestamp_utc')
+
+
 class TelemetryStore:
     """
     Append-only Parquet event log.
@@ -612,32 +662,12 @@ class TelemetryStore:
         :param start, end: bounding datetimes (UTC)
         :param run_id: optional filter to slice a single session
         """
-        if stream not in SCHEMAS:
-            raise ValueError(f"Unknown stream: {stream}")
-
-        stream_dir = self.base_path / stream
-        if not stream_dir.exists():
-            return pd.DataFrame()
-
-        # Walk every Parquet file in the stream directory, filter by date range.
-        # For minute-bar volumes this is fine; if telemetry grows to GBs,
-        # switch to pyarrow.dataset for pushdown filtering.
-        start_utc = pd.Timestamp(start).tz_convert('UTC') if pd.Timestamp(start).tz else pd.Timestamp(start).tz_localize('UTC')
-        end_utc = pd.Timestamp(end).tz_convert('UTC') if pd.Timestamp(end).tz else pd.Timestamp(end).tz_localize('UTC')
-
-        frames = []
-        for path in sorted(stream_dir.glob('*.parquet')):
-            try:
-                df = pd.read_parquet(path)
-                df = df[(df['timestamp_utc'] >= start_utc) & (df['timestamp_utc'] <= end_utc)]
-                if run_id:
-                    df = df[df['run_id'] == run_id]
-                if not df.empty:
-                    frames.append(df)
-            except Exception as e:
-                logger.warning(f"Skipping unreadable telemetry file {path}: {e}")
-
-        if not frames:
-            return pd.DataFrame(columns=[f.name for f in SCHEMAS[stream]])
-
-        return pd.concat(frames, ignore_index=True).sort_values('timestamp_utc')
+        # Delegates to the module-level reader so there is one implementation
+        # of the read path. Instance state supplies only the base_path.
+        return read_telemetry_range(
+            base_path=self.base_path,
+            stream=stream,
+            start=start,
+            end=end,
+            run_id=run_id,
+        )

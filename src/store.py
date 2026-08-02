@@ -58,12 +58,29 @@ class DataStore:
             
         return df
 
-    def load(self, symbols: Union[str, List[str]], start_date=None, end_date=None) -> Dict[str, pd.DataFrame]:
+    def load(self, symbols: Union[str, List[str]], start_date=None, end_date=None,
+             ffill: bool = True) -> Dict[str, pd.DataFrame]:
         """
         PUBLIC API: Loads and perfectly aligns historical data.
         Accepts a single string or a list of strings.
         ALWAYS returns a Dictionary of N-dimensional matrices (Time x Assets),
         matching the exact contract expected by BaseStrategy and PortfolioVectorEngine.
+
+        :param ffill: forward-fill price matrices across the aligned index.
+            Defaults to True, which is the historical behaviour — the vector
+            path (generate_signals / PortfolioVectorEngine) assumes a dense
+            price matrix and every existing caller relies on it.
+
+            Pass False to preserve holes as NaN. The EVENT backtester needs this
+            for its 'reject' missing-bar policy, which mirrors the live engine:
+            DataManager writes an explicit NaN row for a leg that received no
+            ticks so the strategy refuses the incomplete cross-section. Filling
+            here and trying to undo it downstream is impossible — once a hole is
+            filled, which values were real is no longer recoverable.
+
+            Volume is ALWAYS zero-filled regardless of this flag: a missing
+            volume genuinely means no trades, and NaN volume would break
+            arithmetic for no benefit.
         """
         # 1. Standardize Input
         if isinstance(symbols, str):
@@ -97,7 +114,8 @@ class DataStore:
             
             # Forward Fill prices, zero-fill volume
             if metric != 'volume':
-                metric_df.ffill(inplace=True)
+                if ffill:
+                    metric_df.ffill(inplace=True)
             else:
                 metric_df.fillna(0, inplace=True)
                 
