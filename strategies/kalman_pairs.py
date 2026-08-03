@@ -33,7 +33,7 @@ class KalmanPairsStrategy(BaseStrategy):
         self.vt = params.get('vt', 1e-3)        # Observation noise variance
 
         # Production Execution Parameters
-        self.base_qty = params.get('base_qty', 1000)  # Base unit for the Y leg
+        self.base_qty = params.get('base_qty', 100000)  # Base unit for the Y leg
 
         # Minimum tradable size per leg. Guards against a vanishing β (or tiny
         # base_qty) rounding a leg quantity down to 0, which would fire a
