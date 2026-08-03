@@ -86,18 +86,29 @@ class ExecutionHandler:
             label = _contract_label(contract)
 
             # Create the IB Order Object
+
+            # tif='DAY' is set EXPLICITLY on every order. IBKR informational
+            # message 10349 ("Order TIF was set to DAY based on order preset")
+            # is emitted whenever an order reaches the gateway without a TIF and
+            # the gateway substitutes the account's default. On some TWS/Gateway
+            # builds ib_async surfaces that substitution as a cancel event,
+            # which pollutes the log and muddies real rejections (it landed a
+            # few ms before the genuine Error 201 and looked causal). Setting the
+            # TIF ourselves means the gateway never substitutes and never emits
+            # 10349. DAY is already the effective default for these orders, so
+            # this changes nothing about behaviour — only the noise.
             limit_price = None
             if order_type == 'MKT':
-                ib_order = MarketOrder(action, qty)
+                ib_order = MarketOrder(action, qty, tif="DAY")
             elif order_type == 'LMT':
                 limit_price = order_instruction.get('price')
                 if not limit_price:
                     logger.error(f"❌ Limit Order missing price for {contract.symbol}")
                     continue
-                ib_order = LimitOrder(action, qty, limit_price)
+                ib_order = LimitOrder(action, qty, limit_price, tif="DAY")
             else:
                 logger.warning(f"⚠️ Order type {order_type} not implemented yet. Defaulting to MKT.")
-                ib_order = MarketOrder(action, qty)
+                ib_order = MarketOrder(action, qty, tif="DAY")
 
             # Diagnostic only — we do NOT qualify here (see docstring). An
             # unqualified contract still routes if symbol/secType/exchange/
