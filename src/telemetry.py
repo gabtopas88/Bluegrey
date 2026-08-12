@@ -29,6 +29,32 @@ WORKSTREAM B (PARITY HARNESS) — RUN IDENTITY:
     file, so a backtest pointed at data/telemetry/ would physically concatenate
     its rows into the live event log — distinguishable only by run_id, but
     bloating and risking the one artifact that must stay pristine.
+
+Concretely, what it's for:
+
+- Live monitoring — it already feeds your Streamlit dashboard. 
+Every future strategy gets that for free: z-scores, positions, P&L, 
+order flow, all live, because the schema is strategy-agnostic (decisions/orders/fills). 
+You built a cockpit.
+
+- Post-mortem and debugging — when a live run does something weird at 3am 
+(a bad fill, a position that shouldn't exist, a halt), the telemetry is the evidence. 
+Without it you're guessing from logs; with it you replay the exact decision stream 
+and see what the strategy saw. This is what saved you during the Error 201 / silent-order-death 
+investigation — you could prove the engine placed correct orders because every one was recorded.
+
+- Live performance measurement — once fills actually flow (futures), telemetry is where your 
+real track record lives. Realized P&L, actual slippage, actual Sharpe, drawdown — 
+all computed from fills. For a fund that eventually wants outside capital, this is your audit trail. 
+OPM due-diligence asks "show me your live trade log"; telemetry is that log.
+
+- Cost calibration — the thing Tier 2 would have done: measure real execution cost from real fills. 
+You're skipping it for KalmanPairs, but for a strategy worth trading, telemetry is how you learn your true 
+costs empirically instead of guessing.
+
+- Reconciliation against the broker — comparing your recorded fills against IBKR statements to 
+catch discrepancies (the dashboard already flags the realized-P&L-double-counting risk). 
+That's operational risk control, and it matters more with real money.
 """
 import hashlib
 import json

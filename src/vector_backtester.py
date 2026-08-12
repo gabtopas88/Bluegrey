@@ -16,7 +16,7 @@ class PortfolioVectorEngine:
     Features: Matrix-based continuous sizing, Turnover-based Transaction Costs (TC) via IBKR 
     exact routing across N-assets, Look-Ahead Bias prevention, and QuantStats Institutional Tearsheets.
     """
-    def __init__(self, prices: pd.DataFrame, signals: pd.DataFrame, asset_class: str, initial_capital: float = 100000.0, execution_delay: int = 1):
+    def __init__(self, prices: pd.DataFrame, signals: pd.DataFrame, asset_class: str, initial_capital: float = 1000000.0, execution_delay: int = 1):
         """
         :param prices: pd.DataFrame of asset prices (Index=Datetime, Columns=Tickers)
         :param signals: pd.DataFrame of target weights (Index=Datetime, Columns=Tickers)

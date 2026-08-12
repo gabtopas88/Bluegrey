@@ -1,0 +1,35 @@
+{
+  "live_run_id": "470f488b-066f-4711-aac5-17afef349084",
+  "backtest_run_id": "backtest_5b8a01859ff7_20260810T120445.942758Z_8f3252",
+  "verdict": "FAIL",
+  "window_start": "2026-08-05 21:45:00+00:00",
+  "window_end": "2026-08-06 21:43:00+00:00",
+  "tiers": [
+    {
+      "tier": "Tier 1",
+      "name": "Replay Parity",
+      "status": "FAIL",
+      "headline": "Divergence detected over 1317 bars: signal 100.0000%, position 100.0000%, z max diff 0.11010124535528609, beta max diff 5.255226565026305e-08.",
+      "metrics": {
+        "live_bars": 1437,
+        "window_start": "2026-08-05 21:45:00+00:00",
+        "window_end": "2026-08-06 21:43:00+00:00",
+        "backtest_bars": 1437,
+        "joined_bars": 1437,
+        "warmup_bars_excluded": 120,
+        "compared_bars": 1317,
+        "signal_type_match_rate": 1.0,
+        "current_pos_match_rate": 1.0,
+        "z_max_abs_diff": 0.11010124535528609,
+        "beta_max_abs_diff": 5.255226565026305e-08,
+        "z_compared": 1309,
+        "beta_compared": 1317,
+        "float_tolerance": 1e-09,
+        "backtest_gap_resets": 0,
+        "live_post_warmup_warmup_bars": 0
+      },
+      "findings": [],
+      "samples": []
+    }
+  ]
+}

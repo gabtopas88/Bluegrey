@@ -85,7 +85,7 @@ STRATEGY_PARAMS = {
     "vt": 1e-3,                         # Observation noise variance
 
     # Execution sizing
-    "base_qty": 10000,                    # Base unit for the Y leg
+    "base_qty": 10000,                  # Base unit for the Y leg
     "min_order_qty": 1,                 # reject entry if either leg < this
     "hedge_drift_threshold_pct": 20.0,  # Boot-time hedge-ratio drift warning
 }

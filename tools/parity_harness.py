@@ -51,7 +51,16 @@ Usage
 Or from the command line:
 
     python -m research.parity_harness --run-id <live_run_id>
+
+You do NOT re-run the harness for a routine new strategy that fits the same mold 
+(reads closes, standard warm-up, self-contained state). The engine's already proven; 
+running it again just re-confirms what you know.
+You DO run it once, as a one-time gate, when a strategy is about to graduate to 
+live capital and it has any of: novel internal state, a non-trivial warm-up/priming step, 
+a dependency on bar fields beyond close, or anything path-dependent. One clean Tier 1 pass and you never touch it again for that strategy.    
+
 """
+
 import argparse
 import json
 import logging
