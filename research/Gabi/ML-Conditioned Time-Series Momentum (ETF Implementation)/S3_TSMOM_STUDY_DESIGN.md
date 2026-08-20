@@ -1,7 +1,7 @@
 # Strategy 3 — ML-Conditioned Time-Series Momentum (ETF Implementation)
 ## Full Study Design & Pre-Registration Document
 
-**Project:** Bluegrey_Alpha · **Status:** PRE-REGISTERED — DRAFT v1.0 · **Horizon:** Daily rebalance, multi-week holds · **Capital basis:** $1,000,000 via IBKR
+**Project:** Bluegrey_Alpha · **Status:** CLOSED — K1′ FAIL, 2026-08-20 (see §11) **Horizon:** Daily rebalance, multi-week holds · **Capital basis:** $1,000,000 via IBKR
 
 ---
 
@@ -205,6 +205,18 @@ Final candidate re-run under: slippage {1, 2, 5} bps; a flat 50 bps/yr borrow ha
 
 (1) ETF proxies decouple the strategy from true futures carry — carry features are deliberately absent from v1 rather than badly approximated; futures migration (Databento/Norgate + `FUT` fee class + roll logic) is earned by results, not assumed. (2) Expense ratios are embedded in ETF total returns, so management-fee drag is automatically and correctly accounted for — one of the quiet advantages of the ETF route. (3) Borrow cost on shorts is unmodeled in `fees.py`; §7.4's haircut is a stand-in, and a real borrow term remains on the shared fee-model backlog. (4) Single-vendor price risk mitigated only by the §3.4 cross-check — acceptable at daily granularity. (5) The 2009–2019 drought is one historical instance of the regime that kills trend; CPCV cannot manufacture more of them, and no P5 number here should be read as protection against a longer drought. (6) Structural crowding in trend is real and accepted: this premium is bought for its covariance with the rest of the book, and a crowded risk premium erodes rather than inverts.
 
+
+
 ## 11. Amendments log
 
-*(empty at pre-registration)*
+**A1 — 2026-08-15 (pre-data, availability-driven).** Universe change: TLT→SPTL, IEF→SPTI, SHY→BSV. Cause: IBKR serves no history predating the 2016/2017 iShares exchange transfers for the originals (verified by account diagnostic). No model results existed prior to this amendment. Threat-log addition: substitutes were small funds pre-~2012, so modeled early-years tradability is generous; mitigated by the contemporaneous existence of the liquid iShares equivalents. Validation gate: daily-return correlation vs. the iShares twin over the 2016+ overlap must pass (SPTL/TLT ≥ 0.95, SPTI/IEF ≥ 0.95, BSV/SHY ≥ 0.80, the looser bar reflecting BSV's broader holdings).
+
+**A2 - 2026-08-19 (threat-log addition)** LQD has a 48-trading-day data hole (2007-08-30 → 2007-10-17), forward-filled at load; EWJ/EWZ, SPTI (June 2007) and UNG (Nov 2008) carry ≤10-day holes, likewise forward-filled. All predate or barely touch the effective panel start and are judged immaterial; recorded for completeness.
+
+**A3 — 2026-08-19 (post-result; logged as such).** K1 as written (net P5_Sharpe > 0 over 66 paths) was statistically miscalibrated for daily data with ~19-month test blocks: the sampling error of a 3-year Sharpe is ≈ 0.55, so the criterion implicitly demanded a true Sharpe ≈ 1.0. Recorded outcome under original K1: FAIL (B1 P5 −0.148, B2 −0.195). Replacement K1′: best baseline's CPCV median path Sharpe and path win-rate must both exceed the 95th percentile of a 200-draw placebo null (signal direction randomized per asset per 252 bars; identical costs, sizing and paths). One attempt; failure terminates the study. Also recorded: baseline turnover ≈ 10× NAV/yr, higher than the monthly-rebalanced literature version — a fidelity correction is scheduled for Phase 2 and applies equally to baseline and ML variants.
+
+**A4 — 2026-08-19 (post-Phase-1, pre-Phase-2).** Execution-policy fidelity. Phase 1 daily re-targeting produced ~10× NAV/yr turnover vs the literature's monthly rebalance. Two policies tested in nb_s3_02 §2 — daily (band 0.25%) and monthly (21-bar grid, daily risk-only override, band 0.25%). Pre-declared rule: adopt monthly for all subsequent baselines AND ML variants iff the best baseline's full-sample gross Sharpe under monthly ≥ daily − 0.10; else keep daily. One test, mechanical decision, recorded in research/results/s3_phase2_exec_policy.json.
+
+**K1′ result (2026-08-19)**: PASS. B1: median path Sharpe 0.366 vs placebo null95 0.278 (p=0.005); win-rate 0.86 vs 0.70 (p<0.005). B2: 0.247 vs 0.151 (p=0.030); 0.79 vs 0.65 (p=0.010). 200 draws, seed 20260819. Results file: research/results/s3_phase1_placebo_results.json.
+
+**K1′ final record (2026-08-20)**: FAIL — study s3_tsmom_v1 closed. Sequence: original K1 miscalibrated (A3); net placebo PASS (both baselines) but null biased easy by cost-on-lower-vol (~0.09–0.11 Sharpe); gross placebo (declared as superseding before execution): win-rate PASS (p=0.025/0.005), median FAIL (p=0.085/0.065), conjunctive rule → FAIL. Honest synthesis: consistent but thin directional information; median significance ≈ p 0.06–0.09 under all constructions. Process errors logged: A3 test registered without null validation; conflicting finality declarations (cell 8 vs 8d). Holdout never opened. Assets carried forward: full data library + QA, HoldoutVault, optimizer upgrades, placebo methodology, feature module. Phase 2/3 files shelved on branch.

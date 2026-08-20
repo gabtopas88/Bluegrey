@@ -15,8 +15,8 @@ DATA_DIR.mkdir(exist_ok=True)
 # IB_HOST=host.docker.internal) actually take effect. Native runs default to
 # localhost on the paper-trading port and behave exactly as before.
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT = int(os.getenv("IB_PORT", "7497"))
-IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "202"))
+IB_PORT = int(os.getenv("IB_PORT", "7496"))
+IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "99"))
 ACCOUNT_ID = ""
 
 # --- MARKET DATA MODE (Issue 8) ---
@@ -34,6 +34,7 @@ LIBS = {
     "equity_min": "equity/min",
     "fx_min": "fx/min",
     "futures_min": "futures/min",
+    "etf_daily_adj": "etf/daily_adj",
 }
 
 # --- TELEMETRY (Parquet event log) ---

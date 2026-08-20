@@ -32,7 +32,7 @@ class VirtualBroker:
     Simulates the Exchange and the Account.
     Tracks Cash, Positions, and handles Order Execution logic precisely.
     """
-    def __init__(self, initial_capital=100000.0, fee_params: Optional[dict] = None):
+    def __init__(self, initial_capital=1000000.0, fee_params: Optional[dict] = None):
         self.initial_capital = initial_capital
         
         # Gross vs Net Tracking

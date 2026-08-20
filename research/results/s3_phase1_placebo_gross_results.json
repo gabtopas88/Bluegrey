@@ -1,0 +1,26 @@
+{
+  "n_draws": 200,
+  "report": {
+    "sign": {
+      "obs_gross_median": 0.4061721969457889,
+      "null95_gross_median": 0.5125142405969084,
+      "p_median": 0.085,
+      "obs_gross_winrate": 0.8939393939393939,
+      "null95_gross_winrate": 0.8196969696969693,
+      "p_winrate": 0.025,
+      "null_gross_mean": 0.02139288463807731,
+      "PASS": false
+    },
+    "macd": {
+      "obs_gross_median": 0.3453046884275759,
+      "null95_gross_median": 0.37625109074706037,
+      "p_median": 0.065,
+      "obs_gross_winrate": 0.8636363636363636,
+      "null95_gross_winrate": 0.7878787878787878,
+      "p_winrate": 0.005,
+      "null_gross_mean": -0.005339566769359712,
+      "PASS": false
+    }
+  },
+  "K1_fair_pass": false
+}

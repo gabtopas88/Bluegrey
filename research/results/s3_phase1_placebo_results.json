@@ -1,0 +1,24 @@
+{
+  "n_draws": 200,
+  "report": {
+    "sign": {
+      "obs_median": 0.3657666020953405,
+      "null95_median": 0.2782992883634679,
+      "p_median": 0.005,
+      "obs_winrate": 0.8636363636363636,
+      "null95_winrate": 0.6977272727272725,
+      "p_winrate": 0.0,
+      "PASS": true
+    },
+    "macd": {
+      "obs_median": 0.24688514535056946,
+      "null95_median": 0.1512597693686322,
+      "p_median": 0.03,
+      "obs_winrate": 0.7878787878787878,
+      "null95_winrate": 0.6515151515151515,
+      "p_winrate": 0.01,
+      "PASS": true
+    }
+  },
+  "K1_prime_pass": true
+}
